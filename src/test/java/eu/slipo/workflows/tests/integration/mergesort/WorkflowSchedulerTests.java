@@ -40,6 +40,7 @@ import org.springframework.core.task.TaskExecutor;
 import org.springframework.test.context.junit4.SpringRunner;
 import org.springframework.util.StringUtils;
 
+import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.Workflow;
 import eu.slipo.workflows.WorkflowExecution;
 import eu.slipo.workflows.WorkflowExecutionCompletionListener;
@@ -276,7 +277,7 @@ public class WorkflowSchedulerTests
             WorkflowScheduler.ExecutionSnapshot snapshot = workflowScheduler.poll(workflow.id());
             WorkflowExecutionSnapshot workflowExecutionSnapshot = snapshot.workflowExecutionSnapshot();
             assertTrue(workflowExecutionSnapshot.isComplete());
-            assertEquals(WorkflowScheduler.ExecutionStatus.COMPLETED, snapshot.status());
+            assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot.status());
         }
         
         // Test results

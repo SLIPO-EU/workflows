@@ -1,12 +1,9 @@
 package eu.slipo.workflows.service;
 
-import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
-import org.springframework.batch.core.BatchStatus;
-
 import eu.slipo.workflows.Workflow;
+import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.WorkflowExecutionCompletionListener;
 import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.WorkflowExecutionStopListener;
@@ -16,44 +13,11 @@ import eu.slipo.workflows.exception.WorkflowExecutionStopException;
 public interface WorkflowScheduler
 {
     /**
-     * A scheduler-level workflow execution status. Represents the overall status as 
-     * aggregated from nodes that comprise the workflow.
-     */
-    enum ExecutionStatus
-    {
-        /** 
-         * The workflow is started and running (at least one node is running). 
-         * 
-         * <p>Note: There may be failed nodes (i.e. at {@link BatchStatus#FAILED}), but the 
-         * workflow is not yet characterized as failed (this will happen as soon as
-         * all executions are finished).  
-         */
-        RUNNING, 
-                
-        /**
-         * The workflow is stopped (nothing is running) due to a stop request.
-         */
-        STOPPED, 
-        
-        /**
-         * The workflow is not running and at least one node reports as failed 
-         * (i.e. {@link BatchStatus#FAILED}).
-         */
-        FAILED,
-        
-        /**
-         * The workflow is not running and every node reports as complete (i.e at
-         * {@link BatchStatus#COMPLETED})
-         */
-        COMPLETED;
-    }
-    
-    /**
      * A scheduler-level snapshot of a workflow execution
      */
     interface ExecutionSnapshot
     {
-        ExecutionStatus status();
+        WorkflowExecutionStatus status();
         
         WorkflowExecutionSnapshot workflowExecutionSnapshot();
     }
@@ -90,7 +54,7 @@ public interface WorkflowScheduler
      * 
      * @param workflowId The id of the workflow
      */
-    ExecutionStatus status(UUID workflowId);
+    WorkflowExecutionStatus status(UUID workflowId);
     
     /**
      * Fetch information on a workflow execution.

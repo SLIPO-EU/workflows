@@ -5,6 +5,8 @@ import java.util.UUID;
 
 import org.springframework.batch.core.BatchStatus;
 
+import eu.slipo.workflows.WorkflowExecutionStatus;
+
 /**
  * A DTO object providing information on a scheduled workflow execution.
  * 
@@ -78,7 +80,7 @@ public class WorkflowExecutionInfo
     
     private UUID id;
     
-    private WorkflowScheduler.ExecutionStatus status;
+    private WorkflowExecutionStatus status;
     
     private List<NodeExecutionInfo> details;
     
@@ -86,14 +88,14 @@ public class WorkflowExecutionInfo
     {}
     
     public WorkflowExecutionInfo(
-        UUID workflowId, WorkflowScheduler.ExecutionStatus status, List<NodeExecutionInfo> details)
+        UUID workflowId, WorkflowExecutionStatus status, List<NodeExecutionInfo> details)
     {
         this.id = workflowId;
         this.status = status;
         this.details = details;
     }
     
-    public WorkflowExecutionInfo(UUID workflowId, WorkflowScheduler.ExecutionStatus status)
+    public WorkflowExecutionInfo(UUID workflowId, WorkflowExecutionStatus status)
     {
         this(workflowId, status, null);
     }
@@ -108,12 +110,12 @@ public class WorkflowExecutionInfo
         this.id = workflowId;
     }
 
-    public WorkflowScheduler.ExecutionStatus getStatus()
+    public WorkflowExecutionStatus getStatus()
     {
         return status;
     }
 
-    public void setStatus(WorkflowScheduler.ExecutionStatus status)
+    public void setStatus(WorkflowExecutionStatus status)
     {
         this.status = status;
     }

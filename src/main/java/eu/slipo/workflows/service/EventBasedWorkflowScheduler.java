@@ -42,6 +42,7 @@ import org.springframework.data.util.Pair;
 import org.springframework.format.datetime.DateFormatter;
 import org.springframework.stereotype.Service;
 
+import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.Workflow;
 import eu.slipo.workflows.WorkflowExecution;
 import eu.slipo.workflows.WorkflowExecutionCompletionListener;
@@ -89,12 +90,12 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     {
         private final WorkflowExecutionSnapshot workflowExecutionSnapshot;
         
-        private final ExecutionStatus status;
+        private final WorkflowExecutionStatus status;
         
         private final Iterable<WorkflowExecutionListener> listeners;
         
         public ControlSnapshot(
-            ExecutionStatus status, 
+            WorkflowExecutionStatus status, 
             WorkflowExecutionSnapshot workflowExecutionSnapshot,
             Iterator<WorkflowExecutionListener> listenerIterator)
         {
@@ -106,13 +107,13 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         }
         
         public ControlSnapshot(
-            ExecutionStatus status, WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            WorkflowExecutionStatus status, WorkflowExecutionSnapshot workflowExecutionSnapshot)
         {
             this(status, workflowExecutionSnapshot, null);
         }
         
         @Override
-        public ExecutionStatus status()
+        public WorkflowExecutionStatus status()
         {   
             return status;
         }
@@ -146,7 +147,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         /** 
          * The aggregate status for the workflow execution 
          */
-        private volatile ExecutionStatus status = null;
+        private volatile WorkflowExecutionStatus status = null;
         
         /** 
          * A flag that indicates that the workflow execution has encountered at least 
@@ -190,12 +191,12 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                     .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
         }
         
-        public ExecutionStatus status()
+        public WorkflowExecutionStatus status()
         {
             return status;
         }
         
-        public ExecutionStatus getStatus()
+        public WorkflowExecutionStatus getStatus()
         {
             return status;
         }
@@ -214,12 +215,12 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         {
             if (expired)
                 return true;
-            else if (status == null || status == ExecutionStatus.RUNNING)
+            else if (status == null || status == WorkflowExecutionStatus.RUNNING)
                 return false;
             
             synchronized (this) {
                 if (!expired &&
-                        (status == ExecutionStatus.COMPLETED || status == ExecutionStatus.FAILED) &&
+                        (status == WorkflowExecutionStatus.COMPLETED || status == WorkflowExecutionStatus.FAILED) &&
                         (now - lastUpdated > maxDurationAfterUpdate))
                     expired = true;
                 return expired;
@@ -234,23 +235,23 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         public synchronized void startExecution(WorkflowExecutionCompletionListener... callbacks) 
             throws WorkflowExecutionStartException
         {                        
-            if (status == ExecutionStatus.COMPLETED) {
+            if (status == WorkflowExecutionStatus.COMPLETED) {
                 // A completed workflow may not be restarted
                 throw new WorkflowExecutionAlreadyCompleteException();
-            } else if (status == ExecutionStatus.RUNNING) {
+            } else if (status == WorkflowExecutionStatus.RUNNING) {
                 // The execution is running (only one instance of this execution may be running at a time) 
                 throw new WorkflowExecutionAlreadyRunningException();
             } else if (expired) {
                 // The block is expired (failed with no activity for a certain amount of time), and about
                 // to be garbage-collected by a cleanup thread.
-                Validate.validState(status == ExecutionStatus.FAILED);
+                Validate.validState(status == WorkflowExecutionStatus.FAILED);
                 throw new WorkflowExecutionStartException("The execution is expired and marked for removal");
             }
             
             // The execution can be started (either a newly created, failed, or stopped)
             
             Validate.validState(status == null || 
-                    status == ExecutionStatus.FAILED || status == ExecutionStatus.STOPPED,
+                    status == WorkflowExecutionStatus.FAILED || status == WorkflowExecutionStatus.STOPPED,
                 "Did not expect an execution status of %s", status);
             
             // Load (or reload) workflow execution from job repository
@@ -262,11 +263,11 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             // Check if complete, else check if restartable
             
             if (workflowExecution.isComplete()) {
-                Validate.validState(status == null || status == ExecutionStatus.STOPPED);
-                status = ExecutionStatus.COMPLETED;
+                Validate.validState(status == null || status == WorkflowExecutionStatus.STOPPED);
+                status = WorkflowExecutionStatus.COMPLETED;
                 throw new WorkflowExecutionAlreadyCompleteException();
             } else if (workflowExecution.isAbandoned()) {
-                status = ExecutionStatus.FAILED;
+                status = WorkflowExecutionStatus.FAILED;
                 throw new WorkflowExecutionStuckException(
                     "The execution contains nodes marked as abandoned (which are not restartable)");
             }
@@ -285,8 +286,8 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
 
             // Move to running execution status, start ready nodes
             
-            ExecutionStatus previousStatus = status;
-            status = ExecutionStatus.RUNNING;
+            WorkflowExecutionStatus previousStatus = status;
+            status = WorkflowExecutionStatus.RUNNING;
             if (debug) debugRunning(previousStatus);
             startExecution(readyNodes);
         }
@@ -294,7 +295,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         public synchronized void stopExecution(WorkflowExecutionStopListener... callbacks)
             throws WorkflowExecutionStopException
         {
-            if (status == ExecutionStatus.RUNNING) {
+            if (status == WorkflowExecutionStatus.RUNNING) {
                 // Check if stopping and set flag
                 if (stopRequested)
                     throw new WorkflowExecutionAlreadyStoppingException();
@@ -376,7 +377,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             // listeners here (without having to also synchronize this part). That is because at 
             // most one update can report a transition RUNNING -> {COMPLETED,STOPPED,FAILED}.
             
-            if (debug && snapshot.status() != ExecutionStatus.RUNNING)
+            if (debug && snapshot.status() != WorkflowExecutionStatus.RUNNING)
                 debugFinished();
             
             switch (snapshot.status()) {
@@ -408,7 +409,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     
         private synchronized ControlSnapshot updateAfterNode(Workflow.JobNode node, JobExecution jobExecution)
         {
-            Validate.validState(status == ExecutionStatus.RUNNING, 
+            Validate.validState(status == WorkflowExecutionStatus.RUNNING, 
                 "Expected a running execution, not %s", status);
             
             final BatchStatus batchStatus = jobExecution.getStatus();
@@ -424,18 +425,18 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                     if (workflowExecutionSnapshot.isComplete()) {
                         // The entire workflow is complete
                         // Update overall execution status (no other afterNode callback expected)
-                        status = ExecutionStatus.COMPLETED;
+                        status = WorkflowExecutionStatus.COMPLETED;
                     } else if (failed) {
                         // If nothing reported as running during our update, then we can
                         // update overall execution status (no other afterNode callback expected)
                         if (!workflowExecutionSnapshot.isRunning()) {
-                            status = ExecutionStatus.FAILED;
+                            status = WorkflowExecutionStatus.FAILED;
                             if (debug) debugFailed(workflowExecutionSnapshot);
                         }
                     } else if (stopRequested) {
                         // see above (same explanation as if failed)
                         if (!workflowExecutionSnapshot.isRunning()) {
-                            status = failed? ExecutionStatus.FAILED : ExecutionStatus.STOPPED;
+                            status = failed? WorkflowExecutionStatus.FAILED : WorkflowExecutionStatus.STOPPED;
                             if (debug) debugStopped(workflowExecutionSnapshot);
                         }
                     } else {
@@ -456,7 +457,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                     failed = true;
                     // see case of COMPLETED (same explanation as if failed) 
                     if (!workflowExecutionSnapshot.isRunning()) {
-                        status = ExecutionStatus.FAILED;
+                        status = WorkflowExecutionStatus.FAILED;
                         if (debug) debugFailed(workflowExecutionSnapshot);
                     }
                 }
@@ -465,7 +466,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                 {
                     // see case of COMPLETED (same explanation as if stopRequested) 
                     if (stopRequested && !workflowExecutionSnapshot.isRunning()) {
-                        status = failed? ExecutionStatus.FAILED : ExecutionStatus.STOPPED;
+                        status = failed? WorkflowExecutionStatus.FAILED : WorkflowExecutionStatus.STOPPED;
                         if (debug) debugStopped(workflowExecutionSnapshot);
                     }
                 }
@@ -501,7 +502,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private synchronized ControlSnapshot updateBeforeNode(Workflow.JobNode node, JobExecution jobExecution)
         {            
-            Validate.validState(status == ExecutionStatus.RUNNING, 
+            Validate.validState(status == WorkflowExecutionStatus.RUNNING, 
                 "Expected a running execution, not %s", status);
             
             List<Workflow.JobNode> readyNodes = workflowExecution.update(node.name(), jobExecution);
@@ -592,7 +593,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private void debugFailed(WorkflowExecutionSnapshot workflowExecutionSnapshot)
         {
-            Validate.validState(status == ExecutionStatus.FAILED);
+            Validate.validState(status == WorkflowExecutionStatus.FAILED);
             logger.debug(
                 "The workflow {} has ceased execution due to failures " +
                     "(failed={}): transition from RUNNING to {}", 
@@ -601,7 +602,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private void debugStopped(WorkflowExecutionSnapshot workflowExecutionSnapshot)
         {
-            Validate.validState(status == ExecutionStatus.STOPPED);
+            Validate.validState(status == WorkflowExecutionStatus.STOPPED);
             logger.debug(
                 "The workflow {} has ceased execution due to stop request " +
                     "(stopRequested={}, failed={}): transition from RUNNING to {}", 
@@ -610,15 +611,15 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private void debugFinished()
         {
-            Validate.validState(status != ExecutionStatus.RUNNING);
+            Validate.validState(status != WorkflowExecutionStatus.RUNNING);
             logger.debug(
                 "The workflow {} finished as {} (stopRequested={}, failed={})",
                 workflow.id(), status, stopRequested, failed);
         }
         
-        private void debugRunning(ExecutionStatus previousStatus)
+        private void debugRunning(WorkflowExecutionStatus previousStatus)
         {
-            Validate.validState(status == ExecutionStatus.RUNNING);
+            Validate.validState(status == WorkflowExecutionStatus.RUNNING);
             Validate.validState(!stopRequested && !failed, "Expected flags to be clear");
             
             Map<String,BatchStatus> nodeStatusesByName = workflow.nodeNames().stream()
@@ -796,7 +797,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     }
     
     @Override
-    public ExecutionStatus status(UUID workflowId)
+    public WorkflowExecutionStatus status(UUID workflowId)
     {
         Validate.notNull(workflowId, "The workflow ID is required");
         ControlBlock control = controls.get(workflowId);
