@@ -1,7 +1,6 @@
 package eu.slipo.workflows.tests.integration.mergesort;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.springframework.batch.test.AssertFile.assertFileEquals;
 
@@ -13,13 +12,15 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
 
 import org.junit.After;
@@ -30,7 +31,12 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.job.flow.Flow;
+import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -40,22 +46,24 @@ import org.springframework.core.task.TaskExecutor;
 import org.springframework.test.context.junit4.SpringRunner;
 import org.springframework.util.StringUtils;
 
-import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.Workflow;
+import eu.slipo.workflows.WorkflowBuilderFactory;
 import eu.slipo.workflows.WorkflowExecution;
 import eu.slipo.workflows.WorkflowExecutionCompletionListener;
 import eu.slipo.workflows.WorkflowExecutionCompletionListenerSupport;
+import eu.slipo.workflows.WorkflowExecutionEventListener;
 import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
 import eu.slipo.workflows.WorkflowExecutionSnapshot;
+import eu.slipo.workflows.WorkflowExecutionStatus;
+import eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration;
+import eu.slipo.workflows.examples.mergesort.MergesortWorkflows;
+import eu.slipo.workflows.exception.WorkflowExecutionStartException;
 import eu.slipo.workflows.service.WorkflowScheduler;
 import eu.slipo.workflows.tests.BatchConfiguration;
 import eu.slipo.workflows.tests.JobDataConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
 import eu.slipo.workflows.tests.WorkflowSchedulerConfiguration;
-import eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration;
-import eu.slipo.workflows.examples.mergesort.MergesortWorkflows;
-import eu.slipo.workflows.exception.WorkflowExecutionStartException;
 
 @RunWith(SpringRunner.class)
 @EnableAutoConfiguration
@@ -202,9 +210,28 @@ public class WorkflowSchedulerTests
     private WorkflowScheduler workflowScheduler;
     
     @Autowired
+    private WorkflowBuilderFactory workflowBuilderFactory;
+    
+    @Autowired
     @Qualifier("mergesort.workflows")
     private MergesortWorkflows mergesortWorkflows;
-      
+    
+    @Autowired
+    @Qualifier("mergesort.splitFile.flow")
+    private Flow splitFileFlow;
+    
+    @Autowired
+    @Qualifier("mergesort.statFiles.step")
+    private Step statFilesStep;
+    
+    @Autowired
+    @Qualifier("mergesort.mergeFiles.flow")
+    private Flow mergeFilesFlow;
+    
+    @Autowired
+    @Qualifier("mergesort.sortFile.flow")
+    private Flow sortFileFlow;
+    
     @Before
     public void setUp() throws Exception
     {
@@ -447,12 +474,13 @@ public class WorkflowSchedulerTests
         startAndWaitToComplete(workflow, f.expectedResultPath);
     }
     
-    @Test(timeout = 120 * 1000L)
-    public void testPx9() throws Exception
+    @Test(timeout = 150 * 1000L)
+    public void testPx12() throws Exception
     {
         Fixture f1 = fixtures.get(0);
         Fixture f2 = fixtures.get(1);
         Fixture f3 = fixtures.get(2);
+        Fixture f4 = fixtures.get(3);
         
         Map<Workflow, Path> workflowToResult = new HashMap<>();
         
@@ -507,8 +535,121 @@ public class WorkflowSchedulerTests
             .build();
         workflowToResult.put(w3c, f3.expectedResultPath);
         
+        // f4
+        
+        Workflow w4a = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
+            .numParts(90).mergeIn(5)
+            .build();
+        workflowToResult.put(w4a, f4.expectedResultPath);
+        
+        Workflow w4b = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
+            .numParts(150).mergeIn(5)
+            .build();
+        workflowToResult.put(w4b, f4.expectedResultPath);
+        
+        Workflow w4c = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
+            .numParts(150).mergeIn(10)
+            .build();
+        workflowToResult.put(w4c, f4.expectedResultPath);
+        
         // Submit workflows, expect results
         
         startAndWaitToComplete(workflowToResult);
+    }
+    
+    @Test(timeout = 10 * 1000L)
+    public void test1WithListeners() throws Exception
+    {
+        Fixture f = fixtures.get(0);
+        
+        UUID workflowId = UUID.randomUUID();
+        
+        // Setup listeners
+        
+        Set<String> completed = new ConcurrentSkipListSet<>();
+        
+        CountDownLatch success = new CountDownLatch(1);
+        
+        WorkflowExecutionEventListener globalListener = new WorkflowExecutionEventListenerSupport()
+        {
+            @Override
+            public void afterNode(WorkflowExecutionSnapshot workflowExecutionSnapshot,
+                String nodeName, JobExecution jobExecution)
+            {
+                if (jobExecution.getStatus() == BatchStatus.COMPLETED)
+                    completed.add(nodeName);
+            }
+            
+            @Override
+            public void onSuccess(WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            {
+                success.countDown();
+            }
+        };
+        
+        CountDownLatch split = new CountDownLatch(1);
+        
+        JobExecutionListener splitListener = new JobExecutionListenerSupport()
+        {
+            @Override
+            public void afterJob(JobExecution jobExecution)
+            {
+               split.countDown();
+            }
+        };
+        
+        // Build a workflow
+        
+        Workflow workflow = workflowBuilderFactory.get(workflowId)
+            .job(b -> b
+                .name("splitter")
+                .flow(splitFileFlow)
+                .input(f.inputPath)
+                .parameters(p -> p.addLong("numParts", 3L)
+                    .addString("outputPrefix", "part")
+                    .addString("outputSuffix", ".txt"))
+                .output("part1.txt", "part2.txt", "part3.txt"))
+            .job(b -> b
+                .name("sorter-1")
+                .flow(sortFileFlow)
+                .input("splitter", "part1.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b
+                .name("sorter-2")
+                .flow(sortFileFlow)
+                .input("splitter", "part2.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(c -> c
+                .name("sorter-3")
+                .flow(sortFileFlow)
+                .input("splitter", "part3.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b
+                .name("merger")
+                .flow(mergeFilesFlow)
+                .input("sorter-1", "r.txt")
+                .input("sorter-2", "r.txt")
+                .input("sorter-3", "r.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .output("merger", "r.txt")
+            .listener(globalListener)
+            .listener(new LoggingExecutionEventListener())
+            .listener("splitter", splitListener)
+            .build();
+       
+        
+        startAndWaitToComplete(workflow, f.expectedResultPath);
+        
+        // Test listeners
+        
+        assertTrue("Expected split counter to be zero", split.getCount() == 0L);
+        assertTrue("Expected success counter to be zero", success.getCount() == 0L);
+        assertEquals(
+            new HashSet<>(Arrays.asList("splitter", "sorter-1", "sorter-2", "sorter-3", "merger")), 
+            completed);
     }
 }

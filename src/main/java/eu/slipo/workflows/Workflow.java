@@ -22,6 +22,9 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
 import org.springframework.batch.core.JobParametersBuilder;
 import org.springframework.batch.core.Step;
@@ -769,10 +772,16 @@ public class Workflow
     }
  
     /**
+     * The default listener key is for listening to events from the entire workflow
+     * (i.e. not a specific job node). This key should not conflict with any legal node name.
+     */
+    private static final String DEFAULT_LISTENER_KEY = "_global";
+    
+    /**
      * A builder for a {@link Workflow}
      */
     public static class Builder
-    {        
+    { 
         private static final AntPathMatcher pathMatcher = new AntPathMatcher(); 
         
         private final Path dataDir;
@@ -781,9 +790,17 @@ public class Workflow
         
         private List<JobDefinition> defs = new ArrayList<>();
         
+        /**
+         * Map output filenames (i.e. workflow results) to intermediate result URIs.
+         */
         private Map<String,URI> output = new HashMap<>();
         
-        private List<WorkflowExecutionListener> listeners = new ArrayList<>();
+        /**
+         * Map node names to execution listeners. A special key of {@link Workflow#DEFAULT_LISTENER_KEY}
+         * is reserved for binding listeners to events not targeting a specific node (but the
+         * entire workflow).  
+         */
+        private Map<String, List<WorkflowExecutionListener>> listeners = new HashMap<>();
         
         Builder(UUID id, Path dataDir)
         {
@@ -854,16 +871,66 @@ public class Workflow
         
         /**
          * Register an execution listener.
+         * 
+         * @param listener
          */
         public Builder listener(WorkflowExecutionListener listener)
         {
-            Assert.notNull(listener, "Expected a non-null listener");
-            listeners.add(listener);
+            Assert.notNull(listener, "Expected a non-null execution listener");
+            this.listeners.computeIfAbsent(DEFAULT_LISTENER_KEY, k -> new ArrayList<>())
+                .add(listener);
             return this;
         }
         
         /**
+         * Register an execution listener targeting a specific job node.
+         * 
+         * @param nodeName The name of the job node
+         * @param listener 
+         */
+        public Builder listener(String nodeName, WorkflowExecutionListener listener)
+        {
+            Assert.notNull(listener, "Expected a non-null execution listener");
+            Assert.isTrue(!StringUtils.isEmpty(nodeName), "Expected a non-empty node name");
+            this.listeners.computeIfAbsent(nodeName, k -> new ArrayList<>())
+                .add(listener);
+            return this;
+        }
+        
+
+        /**
+         * Register an execution listener targeting a specific job node.
+         * 
+         * @param nodeName The name of the job node
+         * @param listener 
+         */
+        public Builder listener(String nodeName, JobExecutionListener listener)
+        {
+            Assert.notNull(listener, "Expected a non-null execution listener");
+            // Adapt listener to a sub-interface of WorkflowExecutionListener
+            WorkflowExecutionEventListener workflowExecutionListener = new WorkflowExecutionEventListenerSupport()
+            {
+                @Override
+                public void beforeNode(WorkflowExecutionSnapshot workflowExecutionSnapshot,
+                    String nodeName, JobExecution jobExecution)
+                {
+                    listener.beforeJob(jobExecution);
+                }
+                
+                @Override
+                public void afterNode(WorkflowExecutionSnapshot workflowExecutionSnapshot,
+                    String nodeName, JobExecution jobExecution)
+                {
+                    listener.afterJob(jobExecution);
+                }
+            };
+            return listener(nodeName, workflowExecutionListener);
+        }
+        
+        /**
          * Build a job definition by expanding glob-style input wildcards (if any).
+         * 
+         * @param def The job definition to apply to
          */
         private JobDefinition expandDef(JobDefinition def)
         {
@@ -915,16 +982,28 @@ public class Workflow
             final UUID workflowId = this.id;
             final Path workflowDataDir = this.dataDir.resolve(workflowId.toString());
             
-            final List<JobDefinition> defs = this.defs.stream()
-                .map(def -> expandDef(def))
-                .collect(Collectors.toList());
+            final List<JobDefinition> defs = Collections.unmodifiableList(
+                this.defs.stream()
+                    .map(def -> expandDef(def))
+                    .collect(Collectors.toList()));
             
-            final Map<String,URI> output = new HashMap<>(this.output);
+            final Map<String, URI> output = 
+                Collections.unmodifiableMap(new HashMap<>(this.output));
             
             Workflow workflow = new Workflow(workflowId, workflowDataDir, defs, output);
             
-            if (!this.listeners.isEmpty())
-                workflow.setListeners(new ArrayList<>(this.listeners));
+            // Setup listeners
+                        
+            Map<String, List<WorkflowExecutionListener>> listeners = null; 
+            if (!this.listeners.isEmpty()) {
+                listeners = Collections.unmodifiableMap(
+                    this.listeners.entrySet().stream()
+                        .map(e -> Pair.of(
+                            e.getKey(),
+                            Collections.unmodifiableList(new ArrayList<>(e.getValue()))))
+                        .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
+                workflow.setListeners(listeners);
+            }
             
             return workflow;
         }
@@ -954,9 +1033,12 @@ public class Workflow
     private final DependencyGraph dependencyGraph;
     
     /**
-     * A list of registered execution listeners
+     * The map of registered execution listeners.
+     * 
+     * A workflow-wide listener is keyed to <tt>null</tt>. A node-wide listener is keyed
+     * to the corresponding (non-empty) node name.  
      */
-    private List<WorkflowExecutionListener> listeners = Collections.emptyList();
+    private Map<String, List<WorkflowExecutionListener>> listeners = Collections.emptyMap();
     
     /**
      * A list of intermediate results that are to be considered as final results of
@@ -968,7 +1050,7 @@ public class Workflow
     {
         this.id = id;
         this.dataDir = dataDir;
-        this.defs = Collections.unmodifiableList(defs);
+        this.defs = defs;
         
         final int n = defs.size();
         
@@ -1022,13 +1104,18 @@ public class Workflow
                 String.format("The node [%s] does not output at %s", res.nodeName(), res.outputPath()));
         }
         
-        this.output = Collections.unmodifiableMap(output);
+        this.output = output;
     } 
     
-    private void setListeners(List<WorkflowExecutionListener> listeners)
+    private void setListeners(Map<String, List<WorkflowExecutionListener>> listeners)
     {
-        Assert.notEmpty(listeners, "Expected a non-empty list of listeners");
-        this.listeners = Collections.unmodifiableList(listeners);
+        Assert.notEmpty(listeners, "Expected a non-empty map of listeners");
+        Assert.isTrue(listeners.keySet().stream()
+                .allMatch(k -> k.equals(DEFAULT_LISTENER_KEY) || nameMap.containsKey(k)), 
+            "Expected all keys to be either null or an existing node name");
+        Assert.isTrue(listeners.values().stream().allMatch(x -> !x.isEmpty()), 
+            "Expected a non-empty list of listeners");
+        this.listeners = listeners;
     }
     
     protected Iterable<Integer> vertices()
@@ -1115,13 +1202,13 @@ public class Workflow
     /**
      * Get the job node by its name
      * 
-     * @param name The name of this job node as it was assigned in the original 
+     * @param nodeName The name of this job node as it was assigned in the original 
      * {@link JobDefinition}.
      */
-    public JobNode node(String name)
+    public JobNode node(String nodeName)
     {
-        int vertex = nameMap.getOrDefault(name, -1);
-        Assert.isTrue(vertex >= 0, "No job node is named as [" + name + "]");
+        int vertex = nameMap.getOrDefault(nodeName, -1);
+        Assert.isTrue(vertex >= 0, "No job node is named as [" + nodeName + "]");
         return new JobNode(vertex);
     }
     
@@ -1171,9 +1258,24 @@ public class Workflow
         return IterableUtils.transformedIterable(vertices, v -> workflow.new JobNode(v));
     }
     
+    /**
+     * Get listeners bound to the entire workflow
+     */
     public List<WorkflowExecutionListener> getListeners()
     {
-        return listeners;
+        return listeners.containsKey(DEFAULT_LISTENER_KEY)? 
+            listeners.get(DEFAULT_LISTENER_KEY) : Collections.emptyList();
+    }
+    
+    /**
+     * Get listeners bound to a specific job node
+     * 
+     * @param nodeName The name of the job node
+     */
+    public List<WorkflowExecutionListener> getListeners(String nodeName)
+    {
+        return listeners.containsKey(nodeName)? 
+            listeners.get(nodeName) : Collections.emptyList();
     }
     
     @Override

@@ -22,11 +22,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.job.flow.Flow;
+import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.core.scope.context.ChunkContext;
 import org.springframework.batch.core.step.tasklet.Tasklet;
 import org.springframework.batch.repeat.RepeatStatus;
@@ -38,6 +41,10 @@ import org.springframework.test.context.junit4.SpringRunner;
 
 import eu.slipo.workflows.Workflow;
 import eu.slipo.workflows.WorkflowBuilderFactory;
+import eu.slipo.workflows.WorkflowExecutionEventListener;
+import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
+import eu.slipo.workflows.WorkflowExecutionListener;
+import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.tests.BatchConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
@@ -77,6 +84,10 @@ public class WorkflowBuilderTests
     
     private Step dummyStep;
 
+    private WorkflowExecutionEventListener listener;
+    
+    private JobExecutionListener listenerAlpha;
+    
     private UUID workflowId;
     
     private Workflow workflow;
@@ -90,9 +101,13 @@ public class WorkflowBuilderTests
             .tasklet(new DummyTasklet())
             .build();
         
+        listener = new WorkflowExecutionEventListenerSupport() {};
+        
+        listenerAlpha = new JobExecutionListenerSupport() {};
+        
         workflow = workflowBuilderFactory.get(workflowId)
             .job(c -> c
-                .name("A")
+                .name("alpha")
                 .flow(dummyStep)
                 .input(inputPath)
                 .output("a1.txt", "a2.txt")
@@ -100,22 +115,24 @@ public class WorkflowBuilderTests
                     .addLong("number", 199L)
                     .addString("greeting", "Hello World")))
             .job(c -> c
-                .name("X")
+                .name("xray")
                 .flow(dummyStep)
                 .parameters(b -> b.addString("foo", "Baz"))
                 .output("x1.txt"))
             .job(c -> c
-                .name("B")
+                .name("bravo")
                 .flow(dummyStep)
-                .input("A", "*.txt")
+                .input("alpha", "*.txt")
                 .output("b1.txt", "b2.txt"))
             .job(c -> c
-                .name("C")
+                .name("charlie")
                 .flow(dummyStep)
-                .input("A", "a1.txt")
+                .input("alpha", "a1.txt")
                 .output("c1.txt", "c2.txt", "c3.txt"))
-            .output("B", "b1.txt", "res-b-1.txt")
-            .output("C", "c1.txt", "res-c-1.txt")
+            .output("bravo", "b1.txt", "res-b-1.txt")
+            .output("charlie", "c1.txt", "res-c-1.txt")
+            .listener(listener)
+            .listener("alpha", listenerAlpha)
             .build();
     }
 
@@ -136,17 +153,17 @@ public class WorkflowBuilderTests
     public void testNodesAndDependencies()
     {   
         assertEquals(
-            new HashSet<>(Arrays.asList("A", "B", "C", "X")), workflow.nodeNames());
+            new HashSet<>(Arrays.asList("alpha", "bravo", "charlie", "xray")), workflow.nodeNames());
         
-        Workflow.JobNode nodeA = workflow.node("A"), 
-            nodeB = workflow.node("B"), 
-            nodeC = workflow.node("C"), 
-            nodeX = workflow.node("X");
+        Workflow.JobNode nodeA = workflow.node("alpha"), 
+            nodeB = workflow.node("bravo"), 
+            nodeC = workflow.node("charlie"), 
+            nodeX = workflow.node("xray");
         
-        assertEquals(nodeA.name(), "A");
-        assertEquals(nodeB.name(), "B");
-        assertEquals(nodeC.name(), "C");
-        assertEquals(nodeX.name(), "X");
+        assertEquals(nodeA.name(), "alpha");
+        assertEquals(nodeB.name(), "bravo");
+        assertEquals(nodeC.name(), "charlie");
+        assertEquals(nodeX.name(), "xray");
         
         // Test dependencies
         
@@ -172,10 +189,10 @@ public class WorkflowBuilderTests
         
         assertEquals(Collections.singletonList(inputPath), nodeA.input());
         
-        assertTrue("Expected input of B to contain output of A", 
+        assertTrue("Expected input of `bravo` to contain output of `alpha`", 
             nodeB.input().containsAll(nodeA.output()));
         
-        assertTrue("Expected input of C to contain output of A named a1.txt", 
+        assertTrue("Expected input of `charlie` to contain output of `alpha` named a1.txt", 
             nodeC.input().containsAll(
                 ListUtils.select(nodeA.output(), p -> p.getFileName().toString().equals("a1.txt"))));
         
@@ -207,13 +224,13 @@ public class WorkflowBuilderTests
     @Test(expected = IllegalArgumentException.class) 
     public void testNonExistingName()
     {
-        workflow.node("Z");
+        workflow.node("zulu");
     }
     
     @Test(expected = UnsupportedOperationException.class) 
     public void testUnmodifiableNames()
     {
-        workflow.nodeNames().add("Z");
+        workflow.nodeNames().add("zulu");
     }
     
     @Test(expected = UnsupportedOperationException.class) 
@@ -236,10 +253,10 @@ public class WorkflowBuilderTests
                 workflow.nodesInTopologicalOrder(),
                 y -> y.name()));
         
-        assertTrue("Expected node A to precede node B", 
-            names.indexOf("A") < names.indexOf("B"));
-        assertTrue("Expected node A to precede node C", 
-            names.indexOf("A") < names.indexOf("C"));
+        assertTrue("Expected node `alpha` to precede node `bravo`", 
+            names.indexOf("alpha") < names.indexOf("bravo"));
+        assertTrue("Expected node `alpha` to precede node `charlie`", 
+            names.indexOf("alpha") < names.indexOf("charlie"));
     }
     
     @Test
@@ -251,11 +268,14 @@ public class WorkflowBuilderTests
             new HashSet<>(Arrays.asList("res-b-1.txt", "res-c-1.txt")),
             outputMap.keySet());
         
-        assertTrue(outputMap.get("res-b-1.txt").startsWith(workflow.stagingDirectory("B")));
-        assertTrue(outputMap.get("res-b-1.txt").endsWith("b1.txt"));
-        
-        assertTrue(outputMap.get("res-c-1.txt").startsWith(workflow.stagingDirectory("C")));
-        assertTrue(outputMap.get("res-c-1.txt").endsWith("c1.txt"));
+        assertTrue(
+            outputMap.get("res-b-1.txt").startsWith(workflow.stagingDirectory("bravo")));
+        assertTrue(
+            outputMap.get("res-b-1.txt").endsWith("b1.txt"));
+        assertTrue(
+            outputMap.get("res-c-1.txt").startsWith(workflow.stagingDirectory("charlie")));
+        assertTrue(
+            outputMap.get("res-c-1.txt").endsWith("c1.txt"));
     }
     
     @Test
@@ -273,9 +293,32 @@ public class WorkflowBuilderTests
             workflowOutputDir.startsWith(workflowDir));
         
         for (String nodeName: workflow.nodeNames()) {
-            assertTrue("Expected node\'s staging directory inside workflow\\'s data directory", 
+            assertTrue("Expected node\'s staging directory inside workflow\'s data directory", 
                 workflow.stagingDirectory(nodeName).startsWith(workflowDir));
         }
     }
 
+    @Test
+    public void testListeners()
+    {
+        assertTrue(workflow.getListeners().size() == 1);
+        assertTrue(workflow.getListeners("alpha").size() == 1);
+        assertTrue(workflow.getListeners("bravo").isEmpty());
+        assertTrue(workflow.getListeners("charlie").isEmpty());
+        assertTrue(workflow.getListeners("xray").isEmpty());
+        assertTrue(workflow.getListeners("zulu").isEmpty());
+    }
+    
+    @Test(expected = UnsupportedOperationException.class)
+    public void testUnmodifiableListeners1()
+    {
+        workflow.getListeners().add(new WorkflowExecutionListener() {});
+    }
+    
+    @Test(expected = UnsupportedOperationException.class)
+    public void testUnmodifiableListeners2()
+    {
+        workflow.getListeners("alpha").add(new WorkflowExecutionListener() {});
+    }
+    
 }

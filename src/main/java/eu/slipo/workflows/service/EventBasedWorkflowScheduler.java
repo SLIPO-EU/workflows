@@ -232,7 +232,16 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             return expired;
         }
         
-        public synchronized void startExecution(WorkflowExecutionCompletionListener... callbacks) 
+        public void startExecution(WorkflowExecutionCompletionListener... callbacks)
+            throws WorkflowExecutionStartException
+        {
+            // Perform some double checks before entering synchronized section
+            if (status == WorkflowExecutionStatus.COMPLETED)
+                throw new WorkflowExecutionAlreadyCompleteException();
+            checkAndStartExecution(callbacks);
+        }
+        
+        private synchronized void checkAndStartExecution(WorkflowExecutionCompletionListener... callbacks) 
             throws WorkflowExecutionStartException
         {                        
             if (status == WorkflowExecutionStatus.COMPLETED) {
@@ -292,7 +301,16 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             startExecution(readyNodes);
         }
         
-        public synchronized void stopExecution(WorkflowExecutionStopListener... callbacks)
+        public void stopExecution(WorkflowExecutionStopListener... callbacks)
+            throws WorkflowExecutionStopException
+        {
+            // Perform some double checks before entering synchronized section
+            if (status != WorkflowExecutionStatus.RUNNING)
+                throw new WorkflowExecutionNotRunningException();
+            stopRunningExecutions(callbacks);
+        }
+        
+        private synchronized void stopRunningExecutions(WorkflowExecutionStopListener... callbacks)
             throws WorkflowExecutionStopException
         {
             if (status == WorkflowExecutionStatus.RUNNING) {
@@ -364,8 +382,10 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             ControlSnapshot snapshot = updateAfterNode(node, jobExecution);
             WorkflowExecutionSnapshot workflowExecutionSnapshot = snapshot.workflowExecutionSnapshot();
             
-            Iterable<WorkflowExecutionListener> listeners = 
-                IterableUtils.chainedIterable(workflow.getListeners(), snapshot.getListeners());
+            Iterable<WorkflowExecutionListener> listeners = IterableUtils.chainedIterable(
+                workflow.getListeners(),
+                workflow.getListeners(nodeName), 
+                snapshot.getListeners());
             
             // Fire registered afterNode listeners
            
@@ -492,8 +512,10 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             ControlSnapshot snapshot = updateBeforeNode(node, jobExecution);
             WorkflowExecutionSnapshot workflowExecutionSnapshot = snapshot.workflowExecutionSnapshot();
             
-            Iterable<WorkflowExecutionListener> listeners = 
-                IterableUtils.chainedIterable(workflow.getListeners(), snapshot.getListeners());
+            Iterable<WorkflowExecutionListener> listeners = IterableUtils.chainedIterable(
+                workflow.getListeners(), 
+                workflow.getListeners(nodeName), 
+                snapshot.getListeners());
             
             // Fire registered beforeNode listeners
             
