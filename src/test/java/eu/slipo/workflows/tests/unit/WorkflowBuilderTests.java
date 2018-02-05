@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -92,6 +93,8 @@ public class WorkflowBuilderTests
     
     private Workflow workflow;
     
+    private Date now;
+    
     @Before
     public void setUp() throws Exception
     {
@@ -105,6 +108,8 @@ public class WorkflowBuilderTests
         
         listenerAlpha = new JobExecutionListenerSupport() {};
         
+        now = new Date();
+        
         workflow = workflowBuilderFactory.get(workflowId)
             .job(c -> c
                 .name("alpha")
@@ -117,16 +122,18 @@ public class WorkflowBuilderTests
             .job(c -> c
                 .name("xray")
                 .flow(dummyStep)
-                .parameters(b -> b.addString("foo", "Baz"))
+                .parameters(Collections.singletonMap("magic", 1997))
                 .output("x1.txt"))
             .job(c -> c
                 .name("bravo")
                 .flow(dummyStep)
+                .parameters(Collections.singletonMap("now", now))
                 .input("alpha", "*.txt")
                 .output("b1.txt", "b2.txt"))
             .job(c -> c
                 .name("charlie")
                 .flow(dummyStep)
+                .parameters(Collections.singletonMap("pi", 3.1415))
                 .input("alpha", "a1.txt")
                 .output("c1.txt", "c2.txt", "c3.txt"))
             .output("bravo", "b1.txt", "res-b-1.txt")
@@ -198,7 +205,7 @@ public class WorkflowBuilderTests
         
         assertEquals(Collections.emptyList(), nodeX.input());
         
-        // Test job-name, flow, and parameters
+        // Test job-name and flow, and parameters
      
         for (Workflow.JobNode node: workflow.nodes()) {
             final JobParameters parameters = node.parameters();
@@ -215,10 +222,21 @@ public class WorkflowBuilderTests
                 .collect(Collectors.toList());
             assertEquals(inputs, node.input());
         }
+    }
+    
+    @Test
+    public void testNodeParameters()
+    {
+        Workflow.JobNode nodeA = workflow.node("alpha"), 
+            nodeB = workflow.node("bravo"), 
+            nodeC = workflow.node("charlie"), 
+            nodeX = workflow.node("xray");
         
         assertEquals(nodeA.parameters().getString("greeting"), "Hello World");
         assertEquals(nodeA.parameters().getLong("number"), Long.valueOf(199L));
-        assertEquals(nodeX.parameters().getString("foo"), "Baz");
+        assertEquals(nodeB.parameters().getDate("now"), now);
+        assertEquals(nodeC.parameters().getDouble("pi"), Double.valueOf(3.1415));
+        assertEquals(nodeX.parameters().getLong("magic"), Long.valueOf(1997));
     }
     
     @Test(expected = IllegalArgumentException.class) 

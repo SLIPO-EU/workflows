@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -448,6 +449,31 @@ public class Workflow
         public JobDefinitionBuilder parameters(Consumer<JobParametersBuilder> configurer)
         {
             return parameters(null, configurer);
+        }
+        
+        /**
+         * Provide a map of parameters for the job.
+         * 
+         * <p>This is a convenience wrapper around {@link JobDefinitionBuilder#parameters(JobParameters)} 
+         * to convert a map to a {@link JobParameters} instance, while preserving the basic value types. 
+         * 
+         * @param parameters A map of parameters
+         */
+        public JobDefinitionBuilder parameters(Map<?,?> parameters)
+        {
+            final JobParametersBuilder parametersBuilder = new JobParametersBuilder();
+            parameters.forEach((name, value) -> {
+                final String key = name.toString();
+                if (value instanceof Date)
+                    parametersBuilder.addDate(key, (Date) value);
+                else if (value instanceof Double)
+                    parametersBuilder.addDouble(key, (Double) value);
+                else if (value instanceof Number)
+                    parametersBuilder.addLong(key, ((Number) value).longValue());
+                else
+                    parametersBuilder.addString(key, value.toString());
+            });
+            return parameters(parametersBuilder.toJobParameters());
         }
         
         /**
