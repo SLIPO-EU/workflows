@@ -360,6 +360,12 @@ public class Workflow
         
         private List<Path> output = new ArrayList<>();
         
+        public static JobDefinitionBuilder create(String name)
+        {
+            JobDefinitionBuilder builder = new JobDefinitionBuilder();
+            return builder.name(name);
+        }
+        
         public JobDefinitionBuilder() {}
                 
         /**
