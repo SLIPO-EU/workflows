@@ -664,7 +664,7 @@ public class WorkflowSchedulerTests
             completed);
     }
     
-    @Test  // Fixme (timeout = 30 * 1000L)
+    @Test(timeout = 30 * 1000L)
     public void test1WithFailure() throws Exception
     {
         Fixture f = fixtures.get(0);
