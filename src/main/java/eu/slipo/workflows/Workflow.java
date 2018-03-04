@@ -12,10 +12,12 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -23,7 +25,6 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import org.apache.commons.collections4.IterableUtils;
-import org.apache.commons.collections4.MapUtils;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
@@ -113,7 +114,15 @@ public class Workflow
      */
     static class Result
     {
-        private static final String SCHEME = "res";
+        /**
+         * The URI scheme for URIs that represent internal results of a workflow
+         */
+        protected static final String SCHEME = "res";
+        
+        /**
+         * An empty path that stands for the current directory  
+         */
+        protected static final Path DOT_PATH = Paths.get("");
         
         /**
          * The name of a job node expected to produce this result.
@@ -124,19 +133,18 @@ public class Workflow
          * The path under which this result is (expected to be) created. This path 
          * should be relative to node's staging output directory.
          * 
-         * <p>Note that this path can be null or empty, and in this case it simply
+         * <p>Note that this path can be empty or a dot (".") path; in such a case it simply
          * declares a dependency to the named job node. 
          */
         private final Path outputPath;
 
         private Result(String nodeName, Path outputPath)
         {
-            Assert.isTrue(!StringUtils.isEmpty(nodeName), 
-                "Expected a non-empty name for a job node");
-            Assert.isTrue(outputPath == null || !outputPath.isAbsolute(), 
-                "Expected a relative output path (or null)");
+            Assert.isTrue(!StringUtils.isEmpty(nodeName), "Expected a non-empty name for a job node");
+            Assert.notNull(outputPath, "An output path is required");
+            Assert.isTrue(!outputPath.isAbsolute(), "Expected a relative output path");
             this.nodeName = nodeName;
-            this.outputPath = outputPath;
+            this.outputPath = outputPath.normalize();
         }
         
         /**
@@ -160,7 +168,6 @@ public class Workflow
          */
         public Path path()
         {
-            Assert.state(!StringUtils.isEmpty(outputPath), "No output path was given!");
             Path parent = parentPath();
             return parent.resolve(outputPath);
         }
@@ -176,7 +183,7 @@ public class Workflow
         
         public static Result of(String nodeName)
         {
-            return new Result(nodeName, null);
+            return new Result(nodeName, DOT_PATH);
         }
         
         public static Result of(String nodeName, Path outputPath)
@@ -190,7 +197,7 @@ public class Workflow
                 "The given URI is malformed (does not begin with the expected scheme)");
             String nodeName = uri.getHost();
             Assert.isTrue(!StringUtils.isEmpty(nodeName), 
-                "The host (i.e node name) part cannot be empty");
+                "The host part (i.e the node name) cannot be empty");
             String path = uri.getPath().replaceFirst("/", "");
             return new Result(nodeName, Paths.get(path));
         }
@@ -213,8 +220,7 @@ public class Workflow
         @Override
         public String toString()
         {
-            return String.format("%s://%s/%s", 
-                SCHEME, nodeName, outputPath == null? "" : outputPath.toString());
+            return String.format("%s://%s/%s", SCHEME, nodeName, outputPath);
         }
     }
     
@@ -385,7 +391,6 @@ public class Workflow
             Assert.isTrue(Arrays.stream(nameParts)
                     .allMatch(part -> namePartPattern.matcher(part).matches()), 
                 "The given name is not valid");
-            
             this.name = name;
             return this;
         }
@@ -489,8 +494,7 @@ public class Workflow
          */
         public JobDefinitionBuilder input(Path path)
         {
-            Assert.isTrue(path != null && path.isAbsolute(), 
-                "Expected a non-null absolute file path");
+            Assert.isTrue(path != null && path.isAbsolute(), "Expected a non-null absolute file path");
             this.input.add(path.toUri());
             return this;
         }
@@ -505,12 +509,14 @@ public class Workflow
          * 
          * @param dependencyName The name of the job node that we depend on (and must precede)
          * @param path A path that will be resolved relative to the output directory
-         *   of the dependency. An empty or null path can be used to just declare a dependency
-         *   (in the meaning of precedence). A glob-style path can also be used here and will be
-         *   expanded to matching paths when the workflow is built.
+         *   of the dependency. An empty path (or a "." path) can also be used to just declare a 
+         *   dependency (in the meaning of precedence). A glob-style path can also be used here and 
+         *   will be expanded to matching paths when the workflow is built.
          */
         public JobDefinitionBuilder input(String dependencyName, Path path)
         {
+            Assert.notNull(dependencyName, "Expected a non-null name for a job node");
+            Assert.notNull(path, "Expected a non-null path");
             Result res = Result.of(dependencyName, path);
             this.input.add(res.toUri());
             return this;
@@ -549,6 +555,20 @@ public class Workflow
         }
         
         /**
+         * Declare an explicit dependency to another job node.
+         * 
+         * <p>This is convenience method wrapping <tt>input</tt> method provided by this builder;
+         * one could use the {@link JobDefinitionBuilder#input(String, Path)} method passing an 
+         * empty or a dot (".") path as the <tt>outputPath</tt>.
+         * 
+         * @param dependencyName The name of the job node that we depend on (and must precede)
+         */
+        public JobDefinitionBuilder after(String dependencyName)
+        {
+            return input(dependencyName, ".");
+        }
+        
+        /**
          * Designate a file as an the output of this job.
          * <p>An output of a job is made accessible to other parts of the same workflow
          * by making a copy (or link) of it inside a staging output directory.
@@ -557,8 +577,7 @@ public class Workflow
          */
         public JobDefinitionBuilder output(Path path)
         {   
-            Assert.isTrue(path != null && !path.isAbsolute(), 
-                "Expected a non-empty relative file path");
+            Assert.isTrue(path != null && !path.isAbsolute(), "Expected a non-empty relative file path");
             this.output.add(path);
             return this;
         }
@@ -701,12 +720,12 @@ public class Workflow
         public JobParameters parameters()
         {
             final JobDefinition def = defs.get(vertex);
-            final Stream<String> input = def.input().stream()
-                .map(uri -> toAbsolutePath(uri).toString());
+            final List<Path> input = input();
+            final String pathSeparator = File.pathSeparator;
             return new JobParametersBuilder(def.parameters())
                 .addString(Parameter.WORKFLOW.key, id.toString())
-                .addString(Parameter.INPUT.key, 
-                    input.collect(Collectors.joining(File.pathSeparator)))
+                .addString(Parameter.INPUT.key, input.stream()
+                    .collect(Collectors.mapping(Path::toString, Collectors.joining(pathSeparator))))
                 .toJobParameters();
         }
         
@@ -721,21 +740,35 @@ public class Workflow
             final JobDefinition def = defs.get(vertex);
             return def.input().stream()
                 .map(uri -> toAbsolutePath(uri))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toList());
         }
         
+        /**
+         * Map a URI to an absolute file path.
+         * 
+         * <p>This method may return <tt>null</tt> in case a uri is a result (res://) URI
+         * with an empty path (which is legal for this kind of URIs). 
+         * 
+         * @param uri
+         * @return an absolute file path if the <tt>uri</tt> can be mapped, or else <tt>null</tt>.
+         * 
+         * @see Result
+         */
         private Path toAbsolutePath(URI uri)
         {
-            Path inputPath = null;
+            Path path = null;
             String scheme = uri.getScheme();
             if (scheme.equals("file")) {
-                inputPath = Paths.get(uri);
+                path = Paths.get(uri);
             } else if (scheme.equals(Result.SCHEME)) {
-                inputPath = dataDir.resolve(Result.of(uri).path());
+                Result result = Result.of(uri);
+                if (!result.outputPath().equals(Result.DOT_PATH))
+                    path = dataDir.resolve(result.path());
             } else {
                 Assert.state(false, "Encountered an unknown URI scheme [" + scheme + "]");
             }
-            return inputPath;
+            return path;
         }
         
         /**
@@ -1089,9 +1122,8 @@ public class Workflow
         // Map node names to integer vertices
         
         this.nameMap = Collections.unmodifiableMap(
-            IntStream.range(0, n)
-                .mapToObj(v -> Pair.of(defs.get(v).name(), v))
-                .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
+            IntStream.range(0, n).boxed()
+                .collect(Collectors.toMap(v -> defs.get(v).name(), Function.identity())));
         
         // Validate and build dependency graph
         
@@ -1106,7 +1138,8 @@ public class Workflow
                     Assert.state(u >= 0, 
                         String.format("The job node [%s] depends on an undefined node named as [%s]", 
                             def.name(), dependencyName));
-                    Assert.state(defs.get(u).output().contains(res.outputPath()),
+                    Assert.state(res.outputPath.equals(Result.DOT_PATH) || 
+                            defs.get(u).output().contains(res.outputPath()),
                         String.format("The job node [%s] depends on an unknown result: %s", 
                             def.name(), res));
                     this.dependencyGraph.addDependency(v, u);

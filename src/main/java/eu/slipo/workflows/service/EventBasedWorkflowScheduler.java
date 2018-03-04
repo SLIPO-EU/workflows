@@ -17,10 +17,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.apache.commons.collections4.IterableUtils;
 import org.apache.commons.lang3.Validate;
+import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.BatchStatus;
@@ -38,7 +40,6 @@ import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.launch.NoSuchJobExecutionException;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.data.util.Pair;
 import org.springframework.format.datetime.DateFormatter;
 import org.springframework.stereotype.Service;
 
@@ -58,6 +59,7 @@ import eu.slipo.workflows.exception.WorkflowExecutionNotStartedException;
 import eu.slipo.workflows.exception.WorkflowExecutionStartException;
 import eu.slipo.workflows.exception.WorkflowExecutionStopException;
 import eu.slipo.workflows.exception.WorkflowExecutionStuckException;
+import eu.slipo.workflows.util.concurrent.Lazy;
 import eu.slipo.workflows.util.concurrent.LazyUtils;
 
 @Service
@@ -94,22 +96,34 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private final Iterable<WorkflowExecutionListener> listeners;
         
+        private final Lazy<Map<String, List<Throwable>>> failureExceptions;
+        
+        public ControlSnapshot(
+            WorkflowExecutionStatus status, 
+            WorkflowExecutionSnapshot workflowExecutionSnapshot,
+            Iterator<WorkflowExecutionListener> listenerIterator,
+            Iterator<Pair<String, List<Throwable>>> exceptionsIterator)
+        {
+            Validate.notNull(workflowExecutionSnapshot, "The workflow execution snapshot is required");
+            this.workflowExecutionSnapshot = workflowExecutionSnapshot;
+            this.status = status;
+            this.listeners = listenerIterator == null? null : LazyUtils.lazyIterable(listenerIterator);
+            this.failureExceptions = exceptionsIterator == null? null : LazyUtils.lazyMap(exceptionsIterator);
+        }
+        
         public ControlSnapshot(
             WorkflowExecutionStatus status, 
             WorkflowExecutionSnapshot workflowExecutionSnapshot,
             Iterator<WorkflowExecutionListener> listenerIterator)
         {
-            Validate.notNull(workflowExecutionSnapshot, "The workflow execution snapshot is required");
-            this.workflowExecutionSnapshot = workflowExecutionSnapshot;
-            this.status = status;
-            this.listeners = listenerIterator == null? 
-                Collections.emptyList() : LazyUtils.lazyIterable(listenerIterator);
+            this(status, workflowExecutionSnapshot, listenerIterator, null);
         }
         
         public ControlSnapshot(
-            WorkflowExecutionStatus status, WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            WorkflowExecutionStatus status, 
+            WorkflowExecutionSnapshot workflowExecutionSnapshot)
         {
-            this(status, workflowExecutionSnapshot, null);
+            this(status, workflowExecutionSnapshot, null, null);
         }
         
         @Override
@@ -126,7 +140,12 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         public Iterable<WorkflowExecutionListener> getListeners()
         {
-            return listeners;
+            return listeners == null? Collections.emptyList() : listeners;
+        }
+        
+        public Map<String, List<Throwable>> getFailureExceptions()
+        {
+            return failureExceptions.get();
         }
     }
     
@@ -155,6 +174,12 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
          */
         private volatile boolean failed = false;
        
+        /**
+         * A list of pairs of (nodeName, exceptions) holding all the exceptions reported
+         * for a particular job node.
+         */
+        private volatile List<Pair<String, List<Throwable>>> failureExceptions;
+        
         /** 
          * A flag that indicates that the workflow execution is requested to stop. 
          */
@@ -186,9 +211,9 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             // Map node names to Batch jobs (do not burden synchronized parts)
             
             this.jobByNodeName = Collections.unmodifiableMap(
-                IterableUtils.toList(workflow.nodes()).stream()
-                    .map(y -> Pair.of(y.name(), buildJob(y)))
-                    .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
+                IterableUtils.toList(workflow.nodes())
+                    .stream()
+                    .collect(Collectors.toMap(y -> y.name(), y -> buildJob(y))));
         }
         
         public WorkflowExecutionStatus status()
@@ -290,6 +315,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             // Reset flags and listeners
             
             failed = false;
+            failureExceptions = new CopyOnWriteArrayList<>();
             stopRequested = false;
             listeners = new CopyOnWriteArrayList<>(callbacks);
 
@@ -404,7 +430,9 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             case FAILED:
                 {
                     // Fire failure listeners
-                    invokeFailureListeners(listeners, workflowExecutionSnapshot);
+                    Map<String, List<Throwable>> exceptionsByNodeName = 
+                        Collections.unmodifiableMap(snapshot.getFailureExceptions());
+                    invokeFailureListeners(listeners, workflowExecutionSnapshot, exceptionsByNodeName);
                 }
                 break;
             case COMPLETED:
@@ -475,6 +503,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             case FAILED:
                 {
                     failed = true;
+                    failureExceptions.add(Pair.of(node.name(), jobExecution.getAllFailureExceptions()));
                     // see case of COMPLETED (same explanation as if failed) 
                     if (!workflowExecutionSnapshot.isRunning()) {
                         status = WorkflowExecutionStatus.FAILED;
@@ -496,7 +525,8 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                     "A batch status of %s not expected for an afterJob callback", batchStatus);
             }
             
-            return new ControlSnapshot(status, workflowExecutionSnapshot, listeners.iterator());
+            return new ControlSnapshot(
+                status, workflowExecutionSnapshot, listeners.iterator(), failureExceptions.iterator());
         }
 
         public void beforeNode(String nodeName, JobExecution jobExecution)
@@ -591,12 +621,13 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         
         private void invokeFailureListeners(
             Iterable<WorkflowExecutionListener> listeners,
-            WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            WorkflowExecutionSnapshot workflowExecutionSnapshot,
+            Map<String, List<Throwable>> exceptionsByNodeName)
         {
             for (WorkflowExecutionListener listener: listeners) {
                 if (listener instanceof WorkflowExecutionCompletionListener) {
                     ((WorkflowExecutionCompletionListener) listener)
-                        .onFailure(workflowExecutionSnapshot);
+                        .onFailure(workflowExecutionSnapshot, exceptionsByNodeName);
                 }
             }
         }
@@ -645,8 +676,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
             Validate.validState(!stopRequested && !failed, "Expected flags to be clear");
             
             Map<String,BatchStatus> nodeStatusesByName = workflow.nodeNames().stream()
-                .map(nodeName -> Pair.of(nodeName, workflowExecution.node(nodeName).status()))
-                .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond));
+                .collect(Collectors.toMap(Function.identity(), name -> workflowExecution.node(name).status()));
             logger.debug(
                 "The workflow {} is now running, moving from {} to RUNNING: execution={}",
                 workflow.id(), previousStatus, nodeStatusesByName);

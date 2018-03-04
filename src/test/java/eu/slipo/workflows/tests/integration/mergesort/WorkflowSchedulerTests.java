@@ -1,6 +1,7 @@
 package eu.slipo.workflows.tests.integration.mergesort;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.springframework.batch.test.AssertFile.assertFileEquals;
 
@@ -22,6 +23,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.After;
 import org.junit.AfterClass;
@@ -35,9 +37,16 @@ import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.Step;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.StepExecutionListener;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.job.flow.Flow;
+import org.springframework.batch.core.listener.ExecutionContextPromotionListener;
 import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
@@ -53,6 +62,7 @@ import eu.slipo.workflows.WorkflowExecutionCompletionListener;
 import eu.slipo.workflows.WorkflowExecutionCompletionListenerSupport;
 import eu.slipo.workflows.WorkflowExecutionEventListener;
 import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
+import eu.slipo.workflows.WorkflowExecutionListener;
 import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration;
@@ -60,6 +70,7 @@ import eu.slipo.workflows.examples.mergesort.MergesortWorkflows;
 import eu.slipo.workflows.exception.WorkflowExecutionStartException;
 import eu.slipo.workflows.service.WorkflowScheduler;
 import eu.slipo.workflows.tests.BatchConfiguration;
+import eu.slipo.workflows.tests.ExecutionContextPromotionListeners;
 import eu.slipo.workflows.tests.JobDataConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
@@ -83,6 +94,15 @@ public class WorkflowSchedulerTests
     private static Logger logger = LoggerFactory.getLogger(WorkflowSchedulerTests.class);
     
     public static final String RESULT_FILENAME = MergesortWorkflows.RESULT_FILENAME;
+    
+    @SuppressWarnings("serial")
+    private static class InvalidInputException extends RuntimeException
+    {
+        InvalidInputException(String message)
+        {
+            super(message);
+        }
+    }
     
     private static class Fixture
     {
@@ -232,15 +252,14 @@ public class WorkflowSchedulerTests
     @Qualifier("mergesort.sortFile.flow")
     private Flow sortFileFlow;
     
+    @Autowired
+    private StepBuilderFactory stepBuilderFactory;
+    
     @Before
-    public void setUp() throws Exception
-    {
-    }
+    public void setUp() throws Exception {}
 
     @After
-    public void tearDown() throws Exception
-    {
-    }
+    public void tearDown() throws Exception {}
     
     private void startAndWaitToComplete(Workflow workflow, Path expectedResultPath) 
         throws Exception
@@ -557,11 +576,10 @@ public class WorkflowSchedulerTests
         startAndWaitToComplete(workflowToResult);
     }
     
-    @Test(timeout = 10 * 1000L)
+    @Test(timeout = 30 * 1000L)
     public void test1WithListeners() throws Exception
     {
         Fixture f = fixtures.get(0);
-        
         UUID workflowId = UUID.randomUUID();
         
         // Setup listeners
@@ -601,34 +619,28 @@ public class WorkflowSchedulerTests
         // Build a workflow
         
         Workflow workflow = workflowBuilderFactory.get(workflowId)
-            .job(b -> b
-                .name("splitter")
+            .job(b -> b.name("splitter")
                 .flow(splitFileFlow)
                 .input(f.inputPath)
                 .parameters(p -> p.addLong("numParts", 3L)
-                    .addString("outputPrefix", "part")
-                    .addString("outputSuffix", ".txt"))
+                    .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
                 .output("part1.txt", "part2.txt", "part3.txt"))
-            .job(b -> b
-                .name("sorter-1")
+            .job(b -> b.name("sorter-1")
                 .flow(sortFileFlow)
                 .input("splitter", "part1.txt")
                 .parameters(p -> p.addString("outputName", "r.txt"))
                 .output("r.txt"))
-            .job(b -> b
-                .name("sorter-2")
+            .job(b -> b.name("sorter-2")
                 .flow(sortFileFlow)
                 .input("splitter", "part2.txt")
                 .parameters(p -> p.addString("outputName", "r.txt"))
                 .output("r.txt"))
-            .job(c -> c
-                .name("sorter-3")
+            .job(b -> b.name("sorter-3")
                 .flow(sortFileFlow)
                 .input("splitter", "part3.txt")
                 .parameters(p -> p.addString("outputName", "r.txt"))
                 .output("r.txt"))
-            .job(b -> b
-                .name("merger")
+            .job(b -> b.name("merger")
                 .flow(mergeFilesFlow)
                 .input("sorter-1", "r.txt")
                 .input("sorter-2", "r.txt")
@@ -641,7 +653,6 @@ public class WorkflowSchedulerTests
             .listener("splitter", splitListener)
             .build();
        
-        
         startAndWaitToComplete(workflow, f.expectedResultPath);
         
         // Test listeners
@@ -652,4 +663,99 @@ public class WorkflowSchedulerTests
             new HashSet<>(Arrays.asList("splitter", "sorter-1", "sorter-2", "sorter-3", "merger")), 
             completed);
     }
+    
+    @Test  // Fixme (timeout = 30 * 1000L)
+    public void test1WithFailure() throws Exception
+    {
+        Fixture f = fixtures.get(0);
+        
+        // Build a Batch step that simulates a failure
+        
+        final String FAILURE_MESSAGE = "something is invalid";
+        
+        Tasklet validatorTasklet = new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                throw new InvalidInputException(FAILURE_MESSAGE);
+            }
+        };
+                
+        Step validatorStep = stepBuilderFactory.get("validator")
+            .tasklet(validatorTasklet)
+            .listener(ExecutionContextPromotionListeners.fromKeys("outputDir"))
+            .build();
+        
+        // Setup a global failure listener
+        
+        CountDownLatch failed = new CountDownLatch(1);
+        
+        AtomicReference<List<Throwable>> exceptionsRef = new AtomicReference<>();
+        
+        WorkflowExecutionListener failureHandler = new WorkflowExecutionCompletionListenerSupport()
+        {
+            @Override
+            public void onFailure(WorkflowExecutionSnapshot workflowExecutionSnapshot,
+                Map<String, List<Throwable>> failureExceptions)
+            {
+                exceptionsRef.set(failureExceptions.get("validator"));
+                failed.countDown();
+            }
+        };
+        
+        // Build a workflow
+        
+        UUID workflowId = UUID.randomUUID();
+        Workflow workflow = workflowBuilderFactory.get(workflowId)
+            .job(b -> b.name("splitter")
+                .flow(splitFileFlow)
+                .input(f.inputPath)
+                .parameters(p -> p.addLong("numParts", 2L)
+                    .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
+                .output("part1.txt", "part2.txt"))
+            .job(b -> b.name("validator")
+                .flow(validatorStep)
+                .input("splitter", "part1.txt")
+                .input("splitter", "part2.txt")
+                .output("report.json"))
+            .job(b -> b.name("sorter-1")
+                .flow(sortFileFlow)
+                .after("validator")
+                .input("splitter", "part1.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("sorter-2")
+                .flow(sortFileFlow)
+                .after("validator")
+                .input("splitter", "part2.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("merger")
+                .flow(mergeFilesFlow)
+                .input("sorter-1", "r.txt")
+                .input("sorter-2", "r.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .output("merger", "r.txt")
+            .listener(failureHandler)
+            .build();
+       
+        // Start and wait until failure
+        
+        workflowScheduler.start(workflow);
+        failed.await();
+        
+        // Test
+        
+        List<Throwable> exceptions = exceptionsRef.get();
+        assertNotNull(exceptions);
+        assertEquals(1, exceptions.size());
+        
+        Throwable exception1 = exceptions.get(0);
+        assertTrue(exception1 instanceof InvalidInputException);
+        assertEquals(FAILURE_MESSAGE, exception1.getMessage());
+    }
+    
 }

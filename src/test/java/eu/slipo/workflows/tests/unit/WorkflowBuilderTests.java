@@ -23,7 +23,6 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
 import org.springframework.batch.core.Step;
@@ -40,12 +39,13 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.junit4.SpringRunner;
 
+import static org.apache.commons.collections4.IterableUtils.toList;
+
 import eu.slipo.workflows.Workflow;
 import eu.slipo.workflows.WorkflowBuilderFactory;
 import eu.slipo.workflows.WorkflowExecutionEventListener;
 import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
 import eu.slipo.workflows.WorkflowExecutionListener;
-import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.tests.BatchConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
@@ -87,7 +87,7 @@ public class WorkflowBuilderTests
 
     private WorkflowExecutionEventListener listener;
     
-    private JobExecutionListener listenerAlpha;
+    private JobExecutionListener alphaListener;
     
     private UUID workflowId;
     
@@ -106,40 +106,42 @@ public class WorkflowBuilderTests
         
         listener = new WorkflowExecutionEventListenerSupport() {};
         
-        listenerAlpha = new JobExecutionListenerSupport() {};
+        alphaListener = new JobExecutionListenerSupport() {};
         
         now = new Date();
         
         workflow = workflowBuilderFactory.get(workflowId)
-            .job(c -> c
-                .name("alpha")
+            .job(c -> c.name("alpha")
                 .flow(dummyStep)
                 .input(inputPath)
                 .output("a1.txt", "a2.txt")
                 .parameters(b -> b
-                    .addLong("number", 199L)
-                    .addString("greeting", "Hello World")))
-            .job(c -> c
-                .name("xray")
+                    .addLong("number", 199L).addString("greeting", "Hello World")))
+            .job(c -> c.name("xray")
                 .flow(dummyStep)
                 .parameters(Collections.singletonMap("magic", 1997))
                 .output("x1.txt"))
-            .job(c -> c
-                .name("bravo")
+            .job(c -> c.name("alpha-validator")
+                .flow(dummyStep)
+                .parameters(b -> b.addString("strict", "true"))
+                .input("alpha", "*.txt"))
+            .job(c -> c.name("bravo")
                 .flow(dummyStep)
                 .parameters(Collections.singletonMap("now", now))
+                .after("alpha-validator")
                 .input("alpha", "*.txt")
                 .output("b1.txt", "b2.txt"))
-            .job(c -> c
-                .name("charlie")
+            .job(c -> c.name("charlie")
                 .flow(dummyStep)
                 .parameters(Collections.singletonMap("pi", 3.1415))
+                .after("alpha-validator")
                 .input("alpha", "a1.txt")
                 .output("c1.txt", "c2.txt", "c3.txt"))
             .output("bravo", "b1.txt", "res-b-1.txt")
             .output("charlie", "c1.txt", "res-c-1.txt")
             .listener(listener)
-            .listener("alpha", listenerAlpha)
+            .listener("alpha", alphaListener)
+            .listener("alpha-validator", alphaListener)
             .build();
     }
 
@@ -160,31 +162,49 @@ public class WorkflowBuilderTests
     public void testNodesAndDependencies()
     {   
         assertEquals(
-            new HashSet<>(Arrays.asList("alpha", "bravo", "charlie", "xray")), workflow.nodeNames());
+            new HashSet<>(Arrays.asList("alpha", "alpha-validator", "bravo", "charlie", "xray")),
+            workflow.nodeNames());
         
         Workflow.JobNode nodeA = workflow.node("alpha"), 
+            nodeA1 = workflow.node("alpha-validator"),
             nodeB = workflow.node("bravo"), 
             nodeC = workflow.node("charlie"), 
             nodeX = workflow.node("xray");
         
         assertEquals(nodeA.name(), "alpha");
+        assertEquals(nodeA1.name(), "alpha-validator");
         assertEquals(nodeB.name(), "bravo");
         assertEquals(nodeC.name(), "charlie");
         assertEquals(nodeX.name(), "xray");
         
+        System.err.println(workflow.debugGraph());
+        
         // Test dependencies
         
-        assertEquals(Collections.emptyList(), IterableUtils.toList(nodeA.dependencies()));
-        assertEquals(Arrays.asList(nodeB, nodeC), IterableUtils.toList(nodeA.dependents()));
+        assertEquals(
+            Collections.emptySet(), new HashSet<>(toList(nodeA.dependencies())));
+        assertEquals(
+            new HashSet<>(Arrays.asList(nodeA1, nodeB, nodeC)), new HashSet<>(toList(nodeA.dependents())));
 
-        assertEquals(Collections.singletonList(nodeA), IterableUtils.toList(nodeB.dependencies()));
-        assertEquals(Collections.emptyList(), IterableUtils.toList(nodeB.dependents()));
+        assertEquals(
+            Collections.singleton(nodeA), new HashSet<>(toList(nodeA1.dependencies())));
+        assertEquals(
+            new HashSet<>(Arrays.asList(nodeB, nodeC)), new HashSet<>(toList(nodeA1.dependents())));
         
-        assertEquals(Collections.singletonList(nodeA), IterableUtils.toList(nodeC.dependencies()));
-        assertEquals(Collections.emptyList(), IterableUtils.toList(nodeC.dependents()));
+        assertEquals(
+            new HashSet<>(Arrays.asList(nodeA, nodeA1)), new HashSet<>(toList(nodeB.dependencies())));
+        assertEquals(
+            Collections.emptySet(), new HashSet<>(toList(nodeB.dependents())));
         
-        assertEquals(Collections.emptyList(), IterableUtils.toList(nodeX.dependencies()));
-        assertEquals(Collections.emptyList(), IterableUtils.toList(nodeX.dependents()));
+        assertEquals(
+            new HashSet<>(Arrays.asList(nodeA, nodeA1)), new HashSet<>(toList(nodeC.dependencies())));
+        assertEquals(
+            Collections.emptySet(), new HashSet<>(toList(nodeC.dependents())));
+        
+        assertEquals(
+            Collections.emptySet(), new HashSet<>(toList(nodeX.dependencies())));
+        assertEquals(
+            Collections.emptySet(), new HashSet<>(toList(nodeX.dependents())));
         
         // Test inputs and outputs for nodes
        
@@ -195,6 +215,9 @@ public class WorkflowBuilderTests
         }
         
         assertEquals(Collections.singletonList(inputPath), nodeA.input());
+        
+        assertTrue("Expected input of `alpha-validator` to contain output of `alpha`", 
+            nodeA1.input().containsAll(nodeA.output()));
         
         assertTrue("Expected input of `bravo` to contain output of `alpha`", 
             nodeB.input().containsAll(nodeA.output()));
@@ -228,11 +251,13 @@ public class WorkflowBuilderTests
     public void testNodeParameters()
     {
         Workflow.JobNode nodeA = workflow.node("alpha"), 
+            nodeA1 = workflow.node("alpha-validator"),
             nodeB = workflow.node("bravo"), 
             nodeC = workflow.node("charlie"), 
             nodeX = workflow.node("xray");
         
         assertEquals(nodeA.parameters().getString("greeting"), "Hello World");
+        assertEquals(nodeA1.parameters().getString("strict"), "true");
         assertEquals(nodeA.parameters().getLong("number"), Long.valueOf(199L));
         assertEquals(nodeB.parameters().getDate("now"), now);
         assertEquals(nodeC.parameters().getDouble("pi"), Double.valueOf(3.1415));
@@ -268,13 +293,18 @@ public class WorkflowBuilderTests
     {
         List<String> names = IterableUtils.toList(
             IterableUtils.transformedIterable(
-                workflow.nodesInTopologicalOrder(),
-                y -> y.name()));
+                workflow.nodesInTopologicalOrder(), y -> y.name()));
         
+        assertTrue("Expected node `alpha` to precede node `alpha-validator`", 
+            names.indexOf("alpha") < names.indexOf("alpha-validator"));
         assertTrue("Expected node `alpha` to precede node `bravo`", 
             names.indexOf("alpha") < names.indexOf("bravo"));
+        assertTrue("Expected node `alpha-validator` to precede node `bravo`", 
+            names.indexOf("alpha-validator") < names.indexOf("bravo"));
         assertTrue("Expected node `alpha` to precede node `charlie`", 
             names.indexOf("alpha") < names.indexOf("charlie"));
+        assertTrue("Expected node `alpha-validator` to precede node `charlie`", 
+            names.indexOf("alpha-validator") < names.indexOf("charlie"));
     }
     
     @Test
@@ -285,7 +315,6 @@ public class WorkflowBuilderTests
         assertEquals(
             new HashSet<>(Arrays.asList("res-b-1.txt", "res-c-1.txt")),
             outputMap.keySet());
-        
         assertTrue(
             outputMap.get("res-b-1.txt").startsWith(workflow.stagingDirectory("bravo")));
         assertTrue(
@@ -321,6 +350,7 @@ public class WorkflowBuilderTests
     {
         assertTrue(workflow.getListeners().size() == 1);
         assertTrue(workflow.getListeners("alpha").size() == 1);
+        assertTrue(workflow.getListeners("alpha-validator").size() == 1);
         assertTrue(workflow.getListeners("bravo").isEmpty());
         assertTrue(workflow.getListeners("charlie").isEmpty());
         assertTrue(workflow.getListeners("xray").isEmpty());
