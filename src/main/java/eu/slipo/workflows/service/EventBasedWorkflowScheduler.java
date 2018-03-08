@@ -589,8 +589,9 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         {
             for (WorkflowExecutionListener listener: listeners) {
                 if (listener instanceof WorkflowExecutionEventListener) {
-                    ((WorkflowExecutionEventListener) listener)
-                        .afterNode(workflowExecutionSnapshot, nodeName, jobExecution);
+                    WorkflowExecutionEventListener eventListener = (WorkflowExecutionEventListener) listener;
+                    if (eventListener.aboutNode(nodeName))
+                        eventListener.afterNode(workflowExecutionSnapshot, nodeName, jobExecution);
                 }
             }
         }
@@ -601,8 +602,9 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         {
             for (WorkflowExecutionListener listener: listeners) {
                 if (listener instanceof WorkflowExecutionEventListener) {
-                    ((WorkflowExecutionEventListener) listener)
-                        .beforeNode(workflowExecutionSnapshot, nodeName, jobExecution);
+                    WorkflowExecutionEventListener eventListener = (WorkflowExecutionEventListener) listener;
+                    if (eventListener.aboutNode(nodeName))
+                        eventListener.beforeNode(workflowExecutionSnapshot, nodeName, jobExecution);
                 }
             }
         }

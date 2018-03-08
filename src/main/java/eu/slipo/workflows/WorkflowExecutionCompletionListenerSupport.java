@@ -13,8 +13,7 @@ public class WorkflowExecutionCompletionListenerSupport implements WorkflowExecu
 
     @Override
     public void onFailure(
-        WorkflowExecutionSnapshot workflowExecutionSnapshot,
-        Map<String, List<Throwable>> failureExceptions)
+        WorkflowExecutionSnapshot workflowExecutionSnapshot, Map<String, List<Throwable>> failureExceptions)
     {
         // no-op
     }
