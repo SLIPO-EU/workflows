@@ -6,9 +6,9 @@ Roughly, a *workflow* is a graph of Spring-Batch flows. A flow *A* is connected 
 
 ## Build
 
-Before building the package, we must create some temporary directories needed for unit/integration tests (if you cannot use the default directories, edit accordingly the testing configuration under `src/test/resources/config/application.properties`):
+Before building the package, we must create some temporary directories needed for unit/integration tests (if these dont suit you, edit accordingly the testing configuration under `src/test/resources/config/application.properties`):
 
-    mkdir -p /tmp/slipo-workbench/jobs/ /tmp/slipo-workbench/workflows/
+    mkdir -p ~/var/slipo-workbench/jobs/ ~/var/slipo-workbench/workflows/
 
 Build as a common maven module:
 
