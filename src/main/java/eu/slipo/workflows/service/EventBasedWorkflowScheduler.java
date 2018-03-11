@@ -31,14 +31,18 @@ import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionException;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
+import org.springframework.batch.core.configuration.JobRegistry;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.explore.JobExplorer;
 import org.springframework.batch.core.job.flow.Flow;
 import org.springframework.batch.core.launch.JobExecutionNotRunningException;
 import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.launch.NoSuchJobExecutionException;
+import org.springframework.batch.core.launch.support.SimpleJobOperator;
 import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.tasklet.StoppableTasklet;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.format.datetime.DateFormatter;
 import org.springframework.stereotype.Service;
@@ -349,14 +353,10 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                 // Send stop request to job executions of running nodes
                 for (WorkflowExecution.NodeExecution x: workflowExecution.nodes()) {
                     if (x.status().isRunning()) {
-                        logger.debug("Stopping job execution#{}", x.executionId());
-                        try {
-                            jobOperator.stop(x.executionId());
-                        } catch (NoSuchJobExecutionException ex) {
-                            throw new IllegalStateException(ex);
-                        } catch (JobExecutionNotRunningException ex) {
-                            // no-op
-                        }
+                        if (logger.isDebugEnabled()) 
+                            logger.debug("Stopping node {} on job execution #{}", 
+                                x.node(), x.executionId());
+                        stopNode(x.executionId());
                     }
                 }
             } else {
@@ -367,11 +367,13 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
         private Job buildJob(Workflow.JobNode node)
         {
             final Flow flow = node.flow(stepBuilderFactory);
+            final JobExecutionListener listener = 
+                new ExecutionEventListener(workflow.id(), node.name());
             
             return jobBuilderFactory.get(node.jobName())
                 .start(flow)
                     .end()
-                .listener(new ExecutionEventListener(workflow.id(), node.name()))
+                .listener(listener)
                 .build();
         }
         
@@ -382,7 +384,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                 JobParameters jobParameters = node.parameters();
                 JobExecution jobExecution = null;
                 try {
-                    jobExecution = jobLauncher.run(job, jobParameters);
+                    jobExecution = startNode(job, jobParameters);
                     logger.info("Started node {} as job execution #{}", node, jobExecution.getId());
                 } catch (JobExecutionException e) {
                     jobExecution = null;
@@ -393,6 +395,52 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
                     workflowExecution.update(node.name(), jobExecution);
                 }
             }
+        }
+       
+        /**
+         * Start the job execution for a node.
+         * 
+         * <p>This method simply delegates to given {@link JobLauncher}.
+         */
+        private JobExecution startNode(Job job, JobParameters jobParameters)
+            throws JobExecutionException
+        {
+            return jobLauncher.run(job, jobParameters);
+        }
+       
+        /**
+         * Stop a job execution for a node.
+         * 
+         * <p>This method is implemented in a similar (but more simplified) way to 
+         * {@link SimpleJobOperator#stop(long)}. The basic reason for not relying on a 
+         * {@link JobOperator} to stop an execution is to avoid having to register jobs
+         * (in a {@link JobRegistry} instance) before using them. That would be quite
+         * inconvenient because a workflow builds {@link Flow} instances in a dynamic manner
+         * (i.e. depending on the node definition) and then wraps them in a {@link Job} instance.
+         * 
+         * <p>This implentation does not take into account stoppable tasklets
+         * (i.e. it will not specifically handle instances of {@link StoppableTasklet}).
+         * 
+         * <p>An alternative solution, if we wanted to keep using {@link JobOperator} as a 
+         * interface for stopping an execution, would be to create a private member of 
+         * {@link SimpleJobOperator} initialized with an empty non-throwing {@link JobRegistry}
+         * implementation (via {@link SimpleJobOperator#setJobRegistry(ListableJobLocator)}).
+         * 
+         * @param executionId The job execution id (for our node)
+         */
+        private void stopNode(long executionId)
+        {
+            JobExecution jobExecution = jobExplorer.getJobExecution(executionId);
+            Validate.validState(jobExecution != null);
+            
+            // The execution should be stopped by setting it's status to STOPPING. It is 
+            // assumed that the step implementation will check this status at chunk boundaries.
+            
+            BatchStatus status = jobExecution.getStatus();
+            if (status == BatchStatus.STARTED || status == BatchStatus.STARTING) {
+                jobExecution.setStatus(BatchStatus.STOPPING);
+                jobRepository.update(jobExecution);    
+            } 
         }
         
         public void afterNode(String nodeName, JobExecution jobExecution) 
@@ -737,7 +785,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     
     private JobLauncher jobLauncher;
     
-    private JobOperator jobOperator;
+    private JobExplorer jobExplorer;
     
     private JobBuilderFactory jobBuilderFactory;
     
@@ -774,12 +822,13 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     }
     
     /**
-     * Provide the {@link JobOperator} to be used to stop a running execution.
-     * @param jobOperator
+     * Provide the {@link JobExplorer} to be used to find a job execution (by execution id).
+     * 
+     * @param jobExplorer
      */
-    public void setJobOperator(JobOperator jobOperator)
+    public void setJobExplorer(JobExplorer jobExplorer)
     {
-        this.jobOperator = jobOperator;
+        this.jobExplorer = jobExplorer;
     }
     
     /**
@@ -798,7 +847,7 @@ public class EventBasedWorkflowScheduler extends AbstractWorkflowScheduler
     {
         Validate.validState(jobRepository != null, "A jobRepository is required");
         Validate.validState(jobLauncher != null, "A jobLauncher is required");
-        Validate.validState(jobOperator != null, "A jobOperator is required");
+        Validate.validState(jobExplorer != null, "A jobExplorer is required");
         Validate.validState(jobBuilderFactory != null, "A JobBuilderFactory is required");
         Validate.validState(stepBuilderFactory != null, "A StepBuilderFactory is required");
     }

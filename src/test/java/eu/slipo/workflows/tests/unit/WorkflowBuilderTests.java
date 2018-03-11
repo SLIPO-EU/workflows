@@ -312,6 +312,8 @@ public class WorkflowBuilderTests
     {
         Map<String,Path> outputMap = workflow.output();
         
+        assertEquals(workflow.outputNames(), outputMap.keySet());
+        
         assertEquals(
             new HashSet<>(Arrays.asList("res-b-1.txt", "res-c-1.txt")),
             outputMap.keySet());

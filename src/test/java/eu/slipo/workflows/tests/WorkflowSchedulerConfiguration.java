@@ -2,6 +2,7 @@ package eu.slipo.workflows.tests;
 
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.explore.JobExplorer;
 import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.repository.JobRepository;
@@ -24,7 +25,7 @@ public class WorkflowSchedulerConfiguration
     JobLauncher jobLauncher;
     
     @Autowired
-    JobOperator jobOperator;
+    JobExplorer jobExplorer;
     
     @Autowired
     StepBuilderFactory stepBuilderFactory; 
@@ -38,7 +39,7 @@ public class WorkflowSchedulerConfiguration
         EventBasedWorkflowScheduler scheduler = new EventBasedWorkflowScheduler();
         scheduler.setJobRepository(jobRepository);
         scheduler.setJobLauncher(jobLauncher);
-        scheduler.setJobOperator(jobOperator);
+        scheduler.setJobExplorer(jobExplorer);
         scheduler.setJobBuilderFactory(jobBuilderFactory);
         scheduler.setStepBuilderFactory(stepBuilderFactory);
         scheduler.setMaxDurationAfterUpdate(3600L);

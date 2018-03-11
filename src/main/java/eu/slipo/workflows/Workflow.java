@@ -1250,10 +1250,32 @@ public class Workflow
     {
         return Collections.unmodifiableMap(
             output.entrySet().stream()
-                .map(entry -> Pair.of(
-                    entry.getKey(), 
-                    dataDir.resolve(Result.of(entry.getValue()).path())))
-                .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
+                .collect(Collectors.toMap(
+                    e -> e.getKey(),
+                    e -> dataDir.resolve(Result.of(e.getValue()).path()))));
+    }
+    
+    /**
+     * Map (expected) output file to absolute filesystem paths
+     * 
+     * @param fileName The name of the output (as given in the workflow builder)
+     * @return a path, or <tt>null</tt> if no output exists with such a name  
+     */
+    public Path output(String fileName)
+    {
+        URI resultUri = output.get(fileName);
+        if (resultUri != null)
+            return dataDir.resolve(Result.of(resultUri).path());
+        return null;
+    }
+    
+    /**
+     * Get the names for (expected) output files
+     * @return
+     */
+    public Set<String> outputNames()
+    {
+        return Collections.unmodifiableSet(output.keySet());
     }
     
     /**

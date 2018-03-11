@@ -2,6 +2,7 @@ package eu.slipo.workflows.tests.integration.mergesort;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.springframework.batch.test.AssertFile.assertFileEquals;
 
@@ -23,6 +24,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.After;
@@ -40,7 +43,9 @@ import org.springframework.batch.core.Step;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.StepExecutionListener;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.job.builder.FlowBuilder;
 import org.springframework.batch.core.job.flow.Flow;
+import org.springframework.batch.core.job.flow.support.SimpleFlow;
 import org.springframework.batch.core.listener.ExecutionContextPromotionListener;
 import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.core.repository.JobRepository;
@@ -65,6 +70,7 @@ import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
 import eu.slipo.workflows.WorkflowExecutionListener;
 import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.WorkflowExecutionStatus;
+import eu.slipo.workflows.WorkflowExecutionStopListener;
 import eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration;
 import eu.slipo.workflows.examples.mergesort.MergesortWorkflows;
 import eu.slipo.workflows.exception.WorkflowExecutionStartException;
@@ -665,13 +671,14 @@ public class WorkflowSchedulerTests
     }
     
     @Test(timeout = 30 * 1000L)
-    public void test1WithFailure() throws Exception
+    public void test1WithFailureAndRestart() throws Exception
     {
-        Fixture f = fixtures.get(0);
+        Fixture fixture = fixtures.get(0);
         
         // Build a Batch step that simulates a failure
         
-        final String FAILURE_MESSAGE = "something is invalid";
+        final String FAILURE_MESSAGE = "something is invalid";    
+        final AtomicBoolean shouldFail = new AtomicBoolean(true);
         
         Tasklet validatorTasklet = new Tasklet()
         {
@@ -679,22 +686,22 @@ public class WorkflowSchedulerTests
             public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
                 throws Exception
             {
-                throw new InvalidInputException(FAILURE_MESSAGE);
+                if (shouldFail.compareAndSet(true, false))
+                    throw new InvalidInputException(FAILURE_MESSAGE);
+                return RepeatStatus.FINISHED;
             }
         };
                 
         Step validatorStep = stepBuilderFactory.get("validator")
-            .tasklet(validatorTasklet)
-            .listener(ExecutionContextPromotionListeners.fromKeys("outputDir"))
-            .build();
+            .tasklet(validatorTasklet).build();
         
-        // Setup a global failure listener
+        // Setup a global success/failure listener
         
-        CountDownLatch failed = new CountDownLatch(1);
+        final CountDownLatch failed = new CountDownLatch(1);
+        final CountDownLatch succeeded = new CountDownLatch(1);              
+        final AtomicReference<List<Throwable>> exceptionsRef = new AtomicReference<>();
         
-        AtomicReference<List<Throwable>> exceptionsRef = new AtomicReference<>();
-        
-        WorkflowExecutionListener failureHandler = new WorkflowExecutionCompletionListenerSupport()
+        WorkflowExecutionCompletionListener globalListener = new WorkflowExecutionCompletionListenerSupport()
         {
             @Override
             public void onFailure(WorkflowExecutionSnapshot workflowExecutionSnapshot,
@@ -702,6 +709,12 @@ public class WorkflowSchedulerTests
             {
                 exceptionsRef.set(failureExceptions.get("validator"));
                 failed.countDown();
+            }
+            
+            @Override
+            public void onSuccess(WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            {
+                succeeded.countDown();
             }
         };
         
@@ -711,15 +724,14 @@ public class WorkflowSchedulerTests
         Workflow workflow = workflowBuilderFactory.get(workflowId)
             .job(b -> b.name("splitter")
                 .flow(splitFileFlow)
-                .input(f.inputPath)
+                .input(fixture.inputPath)
                 .parameters(p -> p.addLong("numParts", 2L)
                     .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
                 .output("part1.txt", "part2.txt"))
             .job(b -> b.name("validator")
                 .flow(validatorStep)
                 .input("splitter", "part1.txt")
-                .input("splitter", "part2.txt")
-                .output("report.json"))
+                .input("splitter", "part2.txt"))
             .job(b -> b.name("sorter-1")
                 .flow(sortFileFlow)
                 .after("validator")
@@ -739,15 +751,16 @@ public class WorkflowSchedulerTests
                 .parameters(p -> p.addString("outputName", "r.txt"))
                 .output("r.txt"))
             .output("merger", "r.txt")
-            .listener(failureHandler)
             .build();
        
         // Start and wait until failure
         
-        workflowScheduler.start(workflow);
+        workflowScheduler.start(workflow, globalListener);
         failed.await();
+        assertEquals(0L, failed.getCount());
+        assertEquals(1L, succeeded.getCount());
         
-        // Test
+        // Test after failure
         
         List<Throwable> exceptions = exceptionsRef.get();
         assertNotNull(exceptions);
@@ -756,6 +769,186 @@ public class WorkflowSchedulerTests
         Throwable exception1 = exceptions.get(0);
         assertTrue(exception1 instanceof InvalidInputException);
         assertEquals(FAILURE_MESSAGE, exception1.getMessage());
+        
+        WorkflowScheduler.ExecutionSnapshot snapshot1 = workflowScheduler.poll(workflowId);
+        assertEquals(WorkflowExecutionStatus.FAILED, snapshot1.status());
+        WorkflowExecutionSnapshot executionSnapshot1 = snapshot1.workflowExecutionSnapshot();
+        assertTrue(executionSnapshot1.isFailed());
+        assertTrue(executionSnapshot1.node("splitter").executionId() > 0);
+        assertEquals(BatchStatus.COMPLETED, executionSnapshot1.node("splitter").status());
+        assertTrue(executionSnapshot1.node("validator").executionId() > 0);
+        assertEquals(BatchStatus.FAILED, executionSnapshot1.node("validator").status());
+        assertEquals(-1L, executionSnapshot1.node("sorter-1").executionId());
+        assertEquals(BatchStatus.UNKNOWN, executionSnapshot1.node("sorter-1").status());
+        assertEquals(-1L, executionSnapshot1.node("sorter-2").executionId());
+        assertEquals(BatchStatus.UNKNOWN, executionSnapshot1.node("sorter-2").status());
+        assertEquals(-1L, executionSnapshot1.node("merger").executionId());
+        assertEquals(BatchStatus.UNKNOWN, executionSnapshot1.node("merger").status());
+        
+        // Restart
+        
+        workflowScheduler.start(workflow, globalListener);
+        succeeded.await();
+        
+        // Test after success
+        
+        WorkflowScheduler.ExecutionSnapshot snapshot2 = workflowScheduler.poll(workflowId);
+        assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot2.status());
+        WorkflowExecutionSnapshot executionSnapshot2 = snapshot2.workflowExecutionSnapshot();
+        assertTrue(executionSnapshot2.isComplete());
+        
+        Path resultPath = workflow.output("r.txt");
+        assertTrue(Files.exists(resultPath) && Files.isReadable(resultPath));
+        assertFileEquals(fixture.expectedResultPath.toFile(), resultPath.toFile());
     }
     
+    @Test(timeout = 30 * 1000L)
+    public void test1WithStopAndRestart()
+        throws Exception
+    {
+        Fixture fixture = fixtures.get(0);
+        
+        // Build a flow that delays execution (just waiting to be stopped)
+        
+        final AtomicBoolean shouldDelay = new AtomicBoolean(true);
+        final AtomicBoolean stopRequested = new AtomicBoolean(false);
+        final CountDownLatch delayed = new CountDownLatch(1);
+        final CountDownLatch stopped = new CountDownLatch(1);
+        
+        Tasklet prepareTasklet = new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                if (!shouldDelay.get())
+                    throw new IllegalStateException(
+                        "This task was expected to always run before delayTasklet!");
+                logger.info("prepareTasklet: I do nothing");
+                return null;
+            }
+        };
+        
+        Step prepareStep = stepBuilderFactory.get("prepare").tasklet(prepareTasklet).build();
+        
+        Tasklet delayTasklet = new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                if (shouldDelay.get()) {
+                    delayed.countDown();
+                    while (!stopRequested.get()) {
+                        logger.info("delayTasklet: Sleeping for another 1s...");
+                        Thread.sleep(1000L);
+                    }
+                } else {
+                    logger.info("delayTasklet: This task is finally done!");
+                }
+                return null;
+            }
+        };
+        
+        Step delayStep = stepBuilderFactory.get("delay").tasklet(delayTasklet).build();
+        
+        Flow delayFlow = new FlowBuilder<Flow>("delayFlow")
+            .start(prepareStep)
+            .next(delayStep)
+            .build();
+        
+        // Build a workflow
+        
+        UUID workflowId = UUID.randomUUID();
+        Workflow workflow = workflowBuilderFactory.get(workflowId)
+            .job(b -> b.name("splitter")
+                .flow(splitFileFlow)
+                .input(fixture.inputPath)
+                .parameters(p -> p.addLong("numParts", 2L)
+                    .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
+                .output("part1.txt", "part2.txt"))
+            .job(b -> b.name("delay")
+                .flow(delayFlow)
+                .input("splitter", "part1.txt")
+                .input("splitter", "part2.txt"))
+            .job(b -> b.name("sorter-1")
+                .flow(sortFileFlow)
+                .after("delay")
+                .input("splitter", "part1.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("sorter-2")
+                .flow(sortFileFlow)
+                .after("delay")
+                .input("splitter", "part2.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("merger")
+                .flow(mergeFilesFlow)
+                .input("sorter-1", "r.txt")
+                .input("sorter-2", "r.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .output("merger", "r.txt")
+            .build();
+       
+        // Start and stop after a while
+        
+        workflowScheduler.start(workflow);
+        delayed.await();
+        
+        WorkflowExecutionStopListener stopListener = new WorkflowExecutionStopListener()
+        {
+            @Override
+            public void onStopped(WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            {
+                stopped.countDown();
+            }
+        };
+        
+        workflowScheduler.stop(workflowId, stopListener);
+        logger.info("Requested from workflow {} to stop", workflowId);
+        stopRequested.set(true); // to break the loop inside delayTasklet
+        stopped.await();
+        
+        // Test after stopped
+        
+        WorkflowScheduler.ExecutionSnapshot snapshot1 = workflowScheduler.poll(workflowId);
+        assertEquals(WorkflowExecutionStatus.STOPPED, snapshot1.status());
+        WorkflowExecutionSnapshot executionSnapshot1 = snapshot1.workflowExecutionSnapshot();
+        assertTrue(!executionSnapshot1.isComplete() && !executionSnapshot1.isFailed());
+        assertTrue(executionSnapshot1.node("splitter").executionId() > 0);
+        assertEquals(BatchStatus.COMPLETED, executionSnapshot1.node("splitter").status());
+        assertTrue(executionSnapshot1.node("delay").executionId() > 0);
+        assertEquals(BatchStatus.STOPPED, executionSnapshot1.node("delay").status());
+        
+        // Restart
+        
+        shouldDelay.set(false);
+        
+        final CountDownLatch succeeded = new CountDownLatch(1);
+        
+        WorkflowExecutionCompletionListener successListener = new WorkflowExecutionCompletionListenerSupport()
+        {
+            @Override
+            public void onSuccess(WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            {
+                succeeded.countDown();
+            }
+        };
+        
+        workflowScheduler.start(workflow, successListener);
+        succeeded.await();
+        
+        // Test after success
+        
+        WorkflowScheduler.ExecutionSnapshot snapshot2 = workflowScheduler.poll(workflowId);
+        assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot2.status());
+        WorkflowExecutionSnapshot executionSnapshot2 = snapshot2.workflowExecutionSnapshot();
+        assertTrue(executionSnapshot2.isComplete());
+        
+        Path resultPath = workflow.output("r.txt");
+        assertTrue(Files.exists(resultPath) && Files.isReadable(resultPath));
+        assertFileEquals(fixture.expectedResultPath.toFile(), resultPath.toFile());
+    }
 }
