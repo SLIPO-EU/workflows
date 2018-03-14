@@ -2,6 +2,7 @@ package eu.slipo.workflows;
 
 import java.io.File;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -10,6 +11,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -40,6 +42,8 @@ import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
 import eu.slipo.workflows.tasklet.CopyOutputTasklet;
+import eu.slipo.workflows.tasklet.ExportExecutionContextTasklet;
+import eu.slipo.workflows.tasklet.ImportExecutionContextTasklet;
 import eu.slipo.workflows.util.digraph.DependencyGraph;
 import eu.slipo.workflows.util.digraph.DependencyGraphs;
 import eu.slipo.workflows.util.digraph.ExportDependencyGraph;
@@ -88,28 +92,6 @@ public class Workflow
     }
     
     /**
-     * An enumeration of execution-context keys that a workflow is aware of.
-     */
-    public static enum ContextKey 
-    {
-        OUTPUT_ARCHIVE(CopyOutputTasklet.OUTPUT_ARCHIVE_KEY),
-        
-        OUTPUT_DIR(CopyOutputTasklet.OUTPUT_DIR_KEY);
-        
-        private final String key;
-        
-        private ContextKey(String key)
-        {
-            this.key = key;
-        }
-        
-        public String key()
-        {
-            return key;
-        }
-    }
-    
-    /**
      * Represent a result produced by a job of a workflow.
      */
     static class Result
@@ -138,13 +120,21 @@ public class Workflow
          */
         private final Path outputPath;
 
-        private Result(String nodeName, Path outputPath)
+        /**
+         * A key that locates an entry inside the output file. This is meaningfull only for 
+         * output JSON files containing key-value entries (and is only used for accessing parts
+         * of exported execution context).
+         */
+        private final String key;
+        
+        private Result(String nodeName, Path outputPath, String key)
         {
             Assert.isTrue(!StringUtils.isEmpty(nodeName), "Expected a non-empty name for a job node");
             Assert.notNull(outputPath, "An output path is required");
             Assert.isTrue(!outputPath.isAbsolute(), "Expected a relative output path");
             this.nodeName = nodeName;
             this.outputPath = outputPath.normalize();
+            this.key = key;
         }
         
         /**
@@ -173,6 +163,15 @@ public class Workflow
         }
         
         /**
+         * The key that locates an entry inside the output file; will be <tt>null</tt> if a key is
+         * irrelevant to the kind of output this result represents.
+         */
+        public String key()
+        {
+            return key;
+        }
+        
+        /**
          * The output directory relative to data directory of a workflow. This is the parent 
          * directory of the expected output.
          */
@@ -183,12 +182,27 @@ public class Workflow
         
         public static Result of(String nodeName)
         {
-            return new Result(nodeName, DOT_PATH);
+            return new Result(nodeName, DOT_PATH, null);
         }
         
         public static Result of(String nodeName, Path outputPath)
         {
-            return new Result(nodeName, outputPath);
+            return new Result(nodeName, outputPath, null);
+        }
+        
+        public static Result of(String nodeName, String outputPath)
+        {
+            return new Result(nodeName, Paths.get(outputPath), null);
+        }
+        
+        public static Result of(String nodeName, Path outputPath, String entryKey)
+        {
+            return new Result(nodeName, outputPath, entryKey);
+        }
+        
+        public static Result of(String nodeName, String outputPath, String entryKey)
+        {
+            return new Result(nodeName, Paths.get(outputPath), entryKey);
         }
         
         public static Result of(URI uri)
@@ -199,7 +213,8 @@ public class Workflow
             Assert.isTrue(!StringUtils.isEmpty(nodeName), 
                 "The host part (i.e the node name) cannot be empty");
             String path = uri.getPath().replaceFirst("/", "");
-            return new Result(nodeName, Paths.get(path));
+            String key = uri.getFragment();
+            return new Result(nodeName, Paths.get(path), key);
         }
         
         public static Result parse(URI uri)
@@ -209,21 +224,28 @@ public class Workflow
             
             String nodeName = uri.getHost();
             String path = uri.getPath().replaceFirst("/", "");
-            return new Result(nodeName, Paths.get(path));
+            String key = uri.getFragment();
+            return new Result(nodeName, Paths.get(path), key);
         }
         
         public URI toUri()
         {
-            return URI.create(toString());
+            URI uri = null;
+            try {
+                uri = new URI(SCHEME, nodeName, "/" + outputPath.toString(), key);
+            } catch (URISyntaxException ex) {
+                throw new IllegalStateException(ex);
+            }
+            return uri;
         }
         
         @Override
         public String toString()
         {
-            return String.format("%s://%s/%s", SCHEME, nodeName, outputPath);
+            return toUri().toString();
         }
     }
-    
+     
     /**
      * Represent the configuration of a job participating in a workflow. 
      */
@@ -235,7 +257,7 @@ public class Workflow
         private String name;
         
         /**
-         * The actual flow wrapped as a job of a workflow. 
+         * The actual flow to be wrapped as a job node of a workflow. 
          */
         private Flow flow;
         
@@ -264,45 +286,44 @@ public class Workflow
          * to the workflow-level output directory.
          */
         private List<Path> output;
+        
+        /**
+         * A set of keys that represent context entries to be exported (to other nodes)
+         */
+        private Set<String> exportedKeys;
 
-        private JobDefinition(String name, Flow flow, JobParameters parameters) 
+        /**
+         * A map of keys that refer to context entries imported from other nodes. 
+         * 
+         * <p>Note that each context entry is represented by a URI of {@code res://<node-name>/<path>#<contextKey>} 
+         */
+        private Map<String, URI> contextMap;
+        
+        private JobDefinition(String name, Flow flow) 
         {
             this.name = name;
             this.flow = flow;
-            this.parameters = parameters == null? (new JobParameters()) : parameters;
         }
 
-        private void setInput(List<URI> input)
-        {
-            this.input = Collections.unmodifiableList(input);
-        }
-       
-        private void setOutput(List<Path> output)
-        {
-            this.output = Collections.unmodifiableList(output);
-        }
-        
         private JobDefinition withInput(List<URI> input)
         {
-            JobDefinition def = new JobDefinition(this.name, this.flow, this.parameters);
+            JobDefinition def = new JobDefinition(this.name, this.flow);
             def.input = Collections.unmodifiableList(input);
             def.output = this.output;
+            def.parameters = this.parameters;
+            def.exportedKeys = this.exportedKeys;
+            def.contextMap = this.contextMap;
             return def;
         }
        
         private JobDefinition withOutput(List<Path> output)
         {
-            JobDefinition def = new JobDefinition(this.name, this.flow, this.parameters);
+            JobDefinition def = new JobDefinition(this.name, this.flow);
             def.input = this.input;
             def.output = Collections.unmodifiableList(output);
-            return def;
-        }
-        
-        private JobDefinition with(List<URI> input, List<Path> output)
-        {
-            JobDefinition def = new JobDefinition(this.name, this.flow, this.parameters);
-            def.input = Collections.unmodifiableList(input);
-            def.output = Collections.unmodifiableList(output);
+            def.parameters = this.parameters;
+            def.exportedKeys = this.exportedKeys;
+            def.contextMap = this.contextMap;
             return def;
         }
         
@@ -335,12 +356,22 @@ public class Workflow
         {
             return output;
         }
+        
+        public Set<String> exportedKeys()
+        {
+            return exportedKeys;
+        }
+        
+        public Map<String, URI> contextMap()
+        {
+            return contextMap;
+        }
 
         @Override
         public String toString()
         {
-            return String.format("JobDefinition [name=%s, input=%s, output=%s]", 
-                name, input, output);
+            return String.format(
+                "JobDefinition [name=%s, input=%s, output=%s]", name, input, output);
         }
     }
     
@@ -365,6 +396,10 @@ public class Workflow
         private List<URI> input = new ArrayList<>();
         
         private List<Path> output = new ArrayList<>();
+        
+        private List<String> exportedKeys = new ArrayList<>();
+        
+        private Map<String, URI> contextMap = new HashMap<>();
         
         public static JobDefinitionBuilder create(String name)
         {
@@ -516,9 +551,11 @@ public class Workflow
         public JobDefinitionBuilder input(String dependencyName, Path path)
         {
             Assert.notNull(dependencyName, "Expected a non-null name for a job node");
-            Assert.notNull(path, "Expected a non-null path");
-            Result res = Result.of(dependencyName, path);
-            this.input.add(res.toUri());
+            Assert.notNull(path, "Expected a non-null node-relative path for a result");
+            Result result = Result.of(dependencyName, path);
+            URI resultUri = result.toUri();
+            if (!this.input.contains(resultUri)) 
+                this.input.add(resultUri);
             return this;
         }
         
@@ -618,14 +655,53 @@ public class Workflow
             return output(Paths.get(path));
         }
         
+        /**
+         * Designate a set of execution-context entries to be exported. The exported enties are available
+         * to be imported by other (dependent) job nodes of the parent workflow.
+         * 
+         * @param keys The keys for entries to be exported
+         */
+        public JobDefinitionBuilder exportToContext(String ...keys)
+        {
+            Assert.isTrue(keys.length > 0, "Expected a non-empty array of keys");
+            Assert.isTrue(Arrays.stream(keys).noneMatch(StringUtils::isEmpty), 
+                "A key ie expected as a non-blank string");
+            this.exportedKeys.addAll(Arrays.asList(keys));
+            return this;
+        }
+        
+        /**
+         * Add an context entry importing it from the execution context of another job node.
+         * 
+         * <p>Note that this implies that our node will depend on the exporter node.
+         * 
+         * @param dependencyName The node name that exports the entry
+         * @param key The key of the imported entry (as exported from the node we depend on)
+         * @param toKey The key under which the entry is imported into our context
+         */
+        public JobDefinitionBuilder contextFrom(String dependencyName, String key, String toKey)
+        {
+            Assert.isTrue(!StringUtils.isEmpty(dependencyName), "Expected the name of a job node");
+            Assert.isTrue(!StringUtils.isEmpty(key), 
+                "Expected a key for the imported entry");
+            Assert.isTrue(!StringUtils.isEmpty(toKey), 
+                "Expected a key for the entry to be imported into our context");
+            Result result = Result.of(dependencyName, "context.json", key);
+            this.contextMap.put(toKey, result.toUri());
+            return this.after(dependencyName);
+        }
+        
         public JobDefinition build()
         {
-            Assert.state(!StringUtils.isEmpty(name), "A non-empty name is required for a job node");
-            Assert.state(flow != null, "A trunk flow is required for a job");
-            
-            JobDefinition def = new JobDefinition(name, flow, parameters);
-            def.setInput(new ArrayList<>(input));
-            def.setOutput(new ArrayList<>(output));
+            Assert.state(!StringUtils.isEmpty(this.name), "A non-empty name is required for a job node");
+            Assert.state(this.flow != null, "A trunk flow is required for a job");
+                
+            JobDefinition def = new JobDefinition(this.name, this.flow);
+            def.parameters = this.parameters == null? (new JobParameters()) : this.parameters;
+            def.input = new ArrayList<>(this.input);
+            def.output = new ArrayList<>(this.output);
+            def.exportedKeys = new HashSet<>(this.exportedKeys);
+            def.contextMap = new HashMap<>(this.contextMap);
             return def;
         }
     }
@@ -674,7 +750,7 @@ public class Workflow
          * 
          * <p>Note that this flow will not be the same as the one given to the original 
          * {@link JobDefinition}, as it is enhanced (by wrapping it into another flow) to 
-         * support data exchange between jobs of same workflow.
+         * support data exchange (files or key-value entries) between jobs of same workflow.
          * 
          * @param stepBuilderFactory
          */
@@ -682,28 +758,41 @@ public class Workflow
         {
             final JobDefinition def = defs.get(vertex);
             final Flow trunkFlow = def.flow();
-            final String flowName = JOB_NAME_PREFIX + "." + trunkFlow.getName();
-            final List<Path> outputPaths = def.output();
             
-            Flow flow = null;
-            if (!outputPaths.isEmpty()) {
-                // Append a step to copy output into node's staging directory
-                Path targetDir = Result.of(def.name()).parentPath();
-                Tasklet copyOutputTasklet = 
-                    new CopyOutputTasklet(dataDir.resolve(targetDir), outputPaths); 
-                Step copyOutputStep = stepBuilderFactory.get(JOB_NAME_PREFIX + ".copyOutput")
-                    .tasklet(copyOutputTasklet)
+            final String flowName = JOB_NAME_PREFIX + "." + trunkFlow.getName();
+            FlowBuilder<Flow> flowBuilder = new FlowBuilder<Flow>(flowName);
+            
+            final Map<String, URI> contextMap = contextMap();
+            if (!contextMap.isEmpty()) {
+                Step importContextStep = stepBuilderFactory.get(JOB_NAME_PREFIX + ".importContext")
+                    .tasklet(new ImportExecutionContextTasklet(contextMap))
+                    .listener(ExecutionContextPromotionListeners.fromKeys(contextMap.keySet()))
                     .build();
-                flow = new FlowBuilder<Flow>(flowName)
-                    .start(trunkFlow)
-                    .next(copyOutputStep)
-                    .end();
+                flowBuilder = flowBuilder.start(importContextStep).next(trunkFlow);
             } else {
-                // No output from this job: just rename flow
-                flow = new FlowBuilder<Flow>(flowName).start(trunkFlow).end();
+                flowBuilder = flowBuilder.start(trunkFlow);
             }
             
-            return flow;
+            final List<Path> outputPaths = def.output();
+            if (!outputPaths.isEmpty()) {
+                // Append a step to copy output into node's staging directory
+                Path targetDir = outputDir();
+                Step copyOutputStep = stepBuilderFactory.get(JOB_NAME_PREFIX + ".copyOutput")
+                    .tasklet(new CopyOutputTasklet(targetDir, outputPaths))
+                    .build();
+                flowBuilder = flowBuilder.next(copyOutputStep);
+            } 
+            
+            final Set<String> exportedKeys = def.exportedKeys();
+            if (!exportedKeys.isEmpty()) {
+                Path targetPath = exportedContextPath();
+                Step exportContextStep = stepBuilderFactory.get(JOB_NAME_PREFIX + ".exportContext")
+                    .tasklet(new ExportExecutionContextTasklet(targetPath, exportedKeys))
+                    .build();
+                flowBuilder = flowBuilder.next(exportContextStep);
+            }
+            
+            return flowBuilder.build();
         }
         
         /**
@@ -733,42 +822,15 @@ public class Workflow
          * List our (expected) inputs as absolute filesystem paths.
          * 
          * <p>Note that the corresponding files may or may not exist: only when dependencies
-         * are fulfilled, these files are expected to to exist and to be readable.
+         * are fulfilled, these files are expected to exist and to be readable.
          */
         public List<Path> input()
         {
             final JobDefinition def = defs.get(vertex);
             return def.input().stream()
-                .map(uri -> toAbsolutePath(uri))
+                .map(uri -> convertUriToAbsolutePath(uri))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
-        }
-        
-        /**
-         * Map a URI to an absolute file path.
-         * 
-         * <p>This method may return <tt>null</tt> in case a uri is a result (res://) URI
-         * with an empty path (which is legal for this kind of URIs). 
-         * 
-         * @param uri
-         * @return an absolute file path if the <tt>uri</tt> can be mapped, or else <tt>null</tt>.
-         * 
-         * @see Result
-         */
-        private Path toAbsolutePath(URI uri)
-        {
-            Path path = null;
-            String scheme = uri.getScheme();
-            if (scheme.equals("file")) {
-                path = Paths.get(uri);
-            } else if (scheme.equals(Result.SCHEME)) {
-                Result result = Result.of(uri);
-                if (!result.outputPath().equals(Result.DOT_PATH))
-                    path = dataDir.resolve(result.path());
-            } else {
-                Assert.state(false, "Encountered an unknown URI scheme [" + scheme + "]");
-            }
-            return path;
         }
         
         /**
@@ -781,6 +843,16 @@ public class Workflow
             return def.output().stream()
                 .map(p -> dataDir.resolve(Result.of(name, p).path()))
                 .collect(Collectors.toList());
+        }
+        
+        /**
+         * The staging output directory as an absolute path
+         */
+        public Path outputDir()
+        {
+            final JobDefinition def = defs.get(vertex);
+            final Path outputDir = Result.of(def.name()).parentPath();
+            return dataDir.resolve(outputDir);
         }
 
         /**
@@ -828,6 +900,52 @@ public class Workflow
                 return false;
             JobNode other = (JobNode) o;
             return (other.workflow().equals(Workflow.this) && other.vertex == vertex);
+        }
+        
+        /**
+         * Map keys of our (imported) context entries to {@code file://} URIs of our expected
+         * results.
+         */
+        private Map<String, URI> contextMap()
+        {
+            final JobDefinition def = defs.get(vertex);
+            
+            final Function<URI, URI> uriMapper = (resultUri) -> {
+                Result result = Result.of(resultUri);
+                
+                // Turn stage-relative path to an absolute path
+                Path path = dataDir.resolve(result.path());
+                
+                // The context key will be the fragment of our file:// uri 
+                String fragment = result.key();
+                if (fragment == null)
+                    throw new IllegalStateException(
+                        "Expected a non-null fragment for a res:// URI representing a context entry");
+                
+                // Transform to a file:// uri 
+                URI uri = null; 
+                try {
+                    uri = new URI("file", null, path.toString(), fragment);
+                } catch (URISyntaxException e) {
+                    throw new IllegalStateException(e);
+                }
+                
+                return uri;
+            };
+            
+            return def.contextMap().entrySet()
+                .stream()
+                .collect(Collectors.toMap(e -> e.getKey(), e -> uriMapper.apply(e.getValue())));
+        }
+        
+        /**
+         * The absolute path to JSON file holding our exported execution context 
+         */
+        private Path exportedContextPath()
+        {
+            final JobDefinition def = defs.get(vertex);
+            final Path path = Result.of(def.name(), "context.json").path();
+            return dataDir.resolve(path);
         }
         
         private Workflow workflow()
@@ -997,7 +1115,7 @@ public class Workflow
          * 
          * @param def The job definition to apply to
          */
-        private JobDefinition expandDef(JobDefinition def)
+        private JobDefinition expandDefinition(JobDefinition def)
         {
             // Check if any glob-style inputs are present in this job definition
             
@@ -1034,10 +1152,9 @@ public class Workflow
         
         private JobDefinition defByName(String name)
         {
-            Optional<JobDefinition> optionalDef = this.defs.stream()
+            return this.defs.stream()
                 .filter(y -> y.name().equals(name))
-                .findFirst();
-            return optionalDef.isPresent()? optionalDef.get() : null;
+                .findFirst().orElse(null);
         }
         
         public Workflow build()
@@ -1049,11 +1166,10 @@ public class Workflow
             
             final List<JobDefinition> defs = Collections.unmodifiableList(
                 this.defs.stream()
-                    .map(def -> expandDef(def))
+                    .map(def -> expandDefinition(def))
                     .collect(Collectors.toList()));
             
-            final Map<String, URI> output = 
-                Collections.unmodifiableMap(new HashMap<>(this.output));
+            final Map<String, URI> output = Collections.unmodifiableMap(new HashMap<>(this.output));
             
             Workflow workflow = new Workflow(workflowId, workflowDataDir, defs, output);
             
@@ -1061,13 +1177,11 @@ public class Workflow
                         
             Map<String, List<WorkflowExecutionListener>> listeners = null; 
             if (!this.listeners.isEmpty()) {
-                listeners = Collections.unmodifiableMap(
-                    this.listeners.entrySet().stream()
-                        .map(e -> Pair.of(
-                            e.getKey(),
-                            Collections.unmodifiableList(new ArrayList<>(e.getValue()))))
-                        .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond)));
-                workflow.setListeners(listeners);
+                listeners = this.listeners.entrySet().stream()
+                    .collect(Collectors.toMap(
+                        e -> e.getKey(),
+                        e -> Collections.unmodifiableList(new ArrayList<>(e.getValue()))));
+                workflow.setListeners(Collections.unmodifiableMap(listeners));
             }
             
             return workflow;
@@ -1125,7 +1239,7 @@ public class Workflow
             IntStream.range(0, n).boxed()
                 .collect(Collectors.toMap(v -> defs.get(v).name(), Function.identity())));
         
-        // Validate and build dependency graph
+        // Build dependency graph
         
         this.dependencyGraph = DependencyGraphs.create(n);
         for (JobDefinition def: defs) {
@@ -1136,7 +1250,7 @@ public class Workflow
                     String dependencyName = res.nodeName();
                     int u = this.nameMap.getOrDefault(dependencyName, -1);
                     Assert.state(u >= 0, 
-                        String.format("The job node [%s] depends on an undefined node named as [%s]", 
+                        String.format("The job node [%s] depends on an undefined node [%s]", 
                             def.name(), dependencyName));
                     Assert.state(res.outputPath.equals(Result.DOT_PATH) || 
                             defs.get(u).output().contains(res.outputPath()),
@@ -1170,6 +1284,22 @@ public class Workflow
         }
         
         this.output = output;
+        
+        // Check that every context key is exported by some other node
+        
+        for (JobDefinition def: defs) {
+            for (URI entryUri: def.contextMap().values()) {
+                final Result res = Result.of(entryUri);
+                final String entryKey = res.key();
+                int u = this.nameMap.getOrDefault(res.nodeName(), -1);
+                Assert.state(u >= 0, 
+                    String.format("The job node [%s] imports context from an undefined node [%s]", 
+                        def.name(), res.nodeName()));
+                Assert.state(defs.get(u).exportedKeys().contains(entryKey),
+                    String.format("The job node [%s] does not export an entry named [%s]", 
+                        defs.get(u).name(), entryKey));
+            }
+        }
     } 
     
     private void setListeners(Map<String, List<WorkflowExecutionListener>> listeners)
@@ -1181,6 +1311,33 @@ public class Workflow
         Assert.isTrue(listeners.values().stream().allMatch(x -> !x.isEmpty()), 
             "Expected a non-empty list of listeners");
         this.listeners = listeners;
+    }
+    
+    /**
+     * Map a URI to an absolute file path.
+     * 
+     * <p>This method may return <tt>null</tt> in case a uri is a result (res://) URI
+     * with an empty path (which is legal for this kind of URIs). 
+     * 
+     * @param uri A uri refering either to a file ({@code file://}) or to a result ({@code res://})
+     * @return an absolute file path if the <tt>uri</tt> can be mapped, or else <tt>null</tt>.
+     * 
+     * @see Result
+     */
+    private Path convertUriToAbsolutePath(URI uri)
+    {
+        Path path = null;
+        String scheme = uri.getScheme();
+        if (scheme.equals("file")) {
+            path = Paths.get(uri);
+        } else if (scheme.equals(Result.SCHEME)) {
+            Result result = Result.of(uri);
+            if (!result.outputPath().equals(Result.DOT_PATH))
+                path = dataDir.resolve(result.path());
+        } else {
+            Assert.state(false, "Encountered an unknown URI scheme [" + scheme + "]");
+        }
+        return path;
     }
     
     protected Iterable<Integer> vertices()

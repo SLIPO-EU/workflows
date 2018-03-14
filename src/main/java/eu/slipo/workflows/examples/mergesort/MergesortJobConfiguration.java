@@ -27,6 +27,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.Assert;
 
+import eu.slipo.workflows.ExecutionContextPromotionListeners;
+
 @Configuration("mergesort.jobConfiguration")
 public class MergesortJobConfiguration
 {
@@ -48,13 +50,10 @@ public class MergesortJobConfiguration
         }
     }
     
-    @Bean("mergesort.contextListener")
-    public ExecutionContextPromotionListener contextListener()
+    @Bean("mergesort.contextPromotionListener")
+    public StepExecutionListener contextListener()
     {
-        ExecutionContextPromotionListener listener = new ExecutionContextPromotionListener();
-        listener.setKeys(new String[] { "outputDir" });
-        listener.setStrict(true);
-        return listener;
+        return ExecutionContextPromotionListeners.fromKeys("outputDir");
     }
       
     @Bean("mergesort.mergeFiles.tasklet")
@@ -76,7 +75,7 @@ public class MergesortJobConfiguration
     @Bean("mergesort.mergeFiles.step")
     public Step mergeFilesStep(
         @Qualifier("mergesort.mergeFiles.tasklet") Tasklet tasklet,
-        @Qualifier("mergesort.contextListener") ExecutionContextPromotionListener contextListener)
+        @Qualifier("mergesort.contextPromotionListener") StepExecutionListener contextListener)
         throws Exception
     {
         return stepBuilderFactory.get("mergesort.mergeFiles")
@@ -106,7 +105,7 @@ public class MergesortJobConfiguration
     @Bean("mergesort.sortFile.step")
     public Step sortFileStep(
         @Qualifier("mergesort.sortFile.tasklet") Tasklet tasklet, 
-        @Qualifier("mergesort.contextListener") ExecutionContextPromotionListener contextListener) 
+        @Qualifier("mergesort.contextPromotionListener") StepExecutionListener contextListener) 
         throws Exception
     {
         return stepBuilderFactory.get("mergesort.sortFile")
@@ -140,11 +139,12 @@ public class MergesortJobConfiguration
     @Bean("mergesort.splitFile.step")
     public Step splitFileStep(
         @Qualifier("mergesort.splitFile.tasklet") Tasklet tasklet,
-        @Qualifier("mergesort.contextListener") ExecutionContextPromotionListener contextListener) 
+        @Qualifier("mergesort.contextPromotionListener") StepExecutionListener contextListener) 
         throws Exception
     {
         return stepBuilderFactory.get("mergesort.splitFile")
-            .tasklet(tasklet).listener(contextListener)
+            .tasklet(tasklet)
+            .listener(contextListener)
             .build();
     }
     
@@ -159,8 +159,7 @@ public class MergesortJobConfiguration
     public Tasklet statFilesTasklet(@Value("#{jobParameters['input']}") String input)
     {
         List<Path> inputPaths = Arrays.stream(input.split(File.pathSeparator))
-            .map(Paths::get)
-            .collect(Collectors.toList());
+            .collect(Collectors.mapping(Paths::get, Collectors.toList()));
         return new StatFilesTasklet(inputPaths);
     }
     
@@ -168,6 +167,13 @@ public class MergesortJobConfiguration
     public Step statFilesStep(@Qualifier("mergesort.statFiles.tasklet") Tasklet tasklet)
         throws Exception
     {
-        return stepBuilderFactory.get("mergesort.statFiles").tasklet(tasklet).build();
+        String[] contextKeys = new String[] {
+            "input", "count", "size.min", "size.max", "size.average", "size" 
+        };
+        
+        return stepBuilderFactory.get("mergesort.statFiles")
+            .tasklet(tasklet)
+            .listener(ExecutionContextPromotionListeners.fromKeys(contextKeys))
+            .build();
     }
 }

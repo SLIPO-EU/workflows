@@ -2,7 +2,6 @@ package eu.slipo.workflows.tests.integration.mergesort;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.springframework.batch.test.AssertFile.assertFileEquals;
 
@@ -24,7 +23,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -41,16 +39,16 @@ import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.StepExecutionListener;
+import org.springframework.batch.core.StepExecution;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.job.builder.FlowBuilder;
 import org.springframework.batch.core.job.flow.Flow;
-import org.springframework.batch.core.job.flow.support.SimpleFlow;
-import org.springframework.batch.core.listener.ExecutionContextPromotionListener;
 import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.scope.context.StepContext;
 import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.item.ExecutionContext;
 import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -67,7 +65,6 @@ import eu.slipo.workflows.WorkflowExecutionCompletionListener;
 import eu.slipo.workflows.WorkflowExecutionCompletionListenerSupport;
 import eu.slipo.workflows.WorkflowExecutionEventListener;
 import eu.slipo.workflows.WorkflowExecutionEventListenerSupport;
-import eu.slipo.workflows.WorkflowExecutionListener;
 import eu.slipo.workflows.WorkflowExecutionSnapshot;
 import eu.slipo.workflows.WorkflowExecutionStatus;
 import eu.slipo.workflows.WorkflowExecutionStopListener;
@@ -76,7 +73,6 @@ import eu.slipo.workflows.examples.mergesort.MergesortWorkflows;
 import eu.slipo.workflows.exception.WorkflowExecutionStartException;
 import eu.slipo.workflows.service.WorkflowScheduler;
 import eu.slipo.workflows.tests.BatchConfiguration;
-import eu.slipo.workflows.tests.ExecutionContextPromotionListeners;
 import eu.slipo.workflows.tests.JobDataConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
@@ -946,6 +942,112 @@ public class WorkflowSchedulerTests
         assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot2.status());
         WorkflowExecutionSnapshot executionSnapshot2 = snapshot2.workflowExecutionSnapshot();
         assertTrue(executionSnapshot2.isComplete());
+        
+        Path resultPath = workflow.output("r.txt");
+        assertTrue(Files.exists(resultPath) && Files.isReadable(resultPath));
+        assertFileEquals(fixture.expectedResultPath.toFile(), resultPath.toFile());
+    }
+    
+    @Test(timeout = 30 * 1000L)
+    public void test1WithExecutionContext()
+        throws Exception
+    {
+        Fixture fixture = fixtures.get(0);
+        
+        // Build a flow consuming entries from the execution context of a node
+        
+        final AtomicReference<Map<String, Object>> reportContextRef = 
+            new AtomicReference<Map<String,Object>>(null);
+        
+        Tasklet reportTasklet = new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                StepContext stepExecution = chunkContext.getStepContext();
+                Map<String, Object> jobExecutionContext = stepExecution.getJobExecutionContext();
+                
+                reportContextRef.set(jobExecutionContext);
+                return null;
+            }
+        };
+        
+        Step reportStep = stepBuilderFactory.get("report").tasklet(reportTasklet).build();
+        
+        // Build a workflow
+        
+        UUID workflowId = UUID.randomUUID();
+        Workflow workflow = workflowBuilderFactory.get(workflowId)
+            .job(b -> b.name("splitter")
+                .flow(splitFileFlow)
+                .input(fixture.inputPath)
+                .parameters(p -> p.addLong("numParts", 2L)
+                    .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
+                .output("part1.txt", "part2.txt"))
+            .job(b -> b.name("stat")
+                .flow(statFilesStep)
+                .input("splitter", "*")
+                .exportToContext("count", "size", "size.average", "size.min", "size.max"))
+            .job(b -> b.name("sorter-1")
+                .flow(sortFileFlow)
+                .input("splitter", "part1.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("sorter-2")
+                .flow(sortFileFlow)
+                .input("splitter", "part2.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("merger")
+                .flow(mergeFilesFlow)
+                .input("sorter-1", "r.txt")
+                .input("sorter-2", "r.txt")
+                .parameters(p -> p.addString("outputName", "r.txt"))
+                .output("r.txt"))
+            .job(b -> b.name("report")
+                .flow(reportStep)
+                .contextFrom("stat", "size", "totalSize")
+                .contextFrom("stat", "size.average", "averageSize")
+                .contextFrom("stat", "count", "fileCount"))
+            .output("merger", "r.txt")
+            .build();
+        
+        System.err.println(workflow.debugGraph());
+        
+        // Start and wait to complete
+        
+        CountDownLatch done = new CountDownLatch(1);
+        
+        WorkflowExecutionCompletionListener successListener = new WorkflowExecutionCompletionListenerSupport()
+        {
+            @Override
+            public void onSuccess(WorkflowExecutionSnapshot workflowExecutionSnapshot)
+            {
+                done.countDown();
+            }  
+        };
+        
+        workflowScheduler.start(workflow, successListener);
+        done.await();
+        
+        // Test after success
+        
+        Map<String, Object> reportContext = reportContextRef.get();
+        assertNotNull(reportContext);
+        assertNotNull(reportContext.get("totalSize"));
+        assertTrue(reportContext.get("totalSize") instanceof Number);
+        assertEquals(Files.size(fixture.inputPath), ((Number) reportContext.get("totalSize")).longValue());
+        assertNotNull(reportContext.get("averageSize"));
+        assertTrue(reportContext.get("averageSize") instanceof Double);
+        assertNotNull(reportContext.get("fileCount"));
+        assertTrue(reportContext.get("fileCount") instanceof Number);
+        assertEquals(2, ((Number) reportContext.get("fileCount")).intValue());
+        
+        WorkflowScheduler.ExecutionSnapshot snapshot = workflowScheduler.poll(workflowId);
+        assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot.status());
+        WorkflowExecutionSnapshot executionSnapshot = snapshot.workflowExecutionSnapshot();
+        assertTrue(executionSnapshot.isComplete());
         
         Path resultPath = workflow.output("r.txt");
         assertTrue(Files.exists(resultPath) && Files.isReadable(resultPath));

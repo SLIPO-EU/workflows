@@ -116,7 +116,8 @@ public class WorkflowBuilderTests
                 .input(inputPath)
                 .output("a1.txt", "a2.txt")
                 .parameters(b -> b
-                    .addLong("number", 199L).addString("greeting", "Hello World")))
+                    .addLong("number", 199L).addString("greeting", "Hello World"))
+                .exportToContext("numberOfErrors", "numberOfWarnings"))
             .job(c -> c.name("xray")
                 .flow(dummyStep)
                 .parameters(Collections.singletonMap("magic", 1997))
@@ -130,6 +131,7 @@ public class WorkflowBuilderTests
                 .parameters(Collections.singletonMap("now", now))
                 .after("alpha-validator")
                 .input("alpha", "*.txt")
+                .contextFrom("alpha", "numberOfErrors", "alpha.numberOfErrors")
                 .output("b1.txt", "b2.txt"))
             .job(c -> c.name("charlie")
                 .flow(dummyStep)
@@ -370,5 +372,4 @@ public class WorkflowBuilderTests
     {
         workflow.getListeners("alpha").add(new WorkflowExecutionListener() {});
     }
-    
 }
