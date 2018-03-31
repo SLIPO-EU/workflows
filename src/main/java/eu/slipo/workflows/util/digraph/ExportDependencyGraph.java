@@ -124,7 +124,7 @@ public class ExportDependencyGraph
         }
     }
     
-    public static NodeAttributes DEFAULT_NODE_ATTRS = new NodeAttributes();
+    public static final NodeAttributes DEFAULT_NODE_ATTRS = new NodeAttributes();
     
     /**
      * Dump a dependency graph using DOT format

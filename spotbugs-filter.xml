@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<FindBugsFilter>
+  <And>
+    <Bug pattern="DE_MIGHT_IGNORE"/>
+    <Bug code="DE"/>
+    <Priority value="2"/>
+    <Bug category="BAD_PRACTICE"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.MergeFilesTasklet"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.SortFileTasklet"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.SplitFileTasklet"/>
+  </And>
+  <And>
+    <Class name="eu.slipo.workflows.Workflow$Builder"/>
+    <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+    <Bug code="NP"/>
+    <Bug category="STYLE"/>
+    <Class name="~eu.slipo.workflows\.[^.]+"/>
+  </And>
+  <And>
+    <Bug pattern="DE_MIGHT_IGNORE"/>
+    <Bug code="DE"/>
+    <Priority value="2"/>
+    <Bug category="BAD_PRACTICE"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.MergesortJobConfiguration"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.MergeFilesTasklet"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.SortFileTasklet"/>
+  </And>
+  <And>
+    <Bug pattern="DM_DEFAULT_ENCODING"/>
+    <Bug code="Dm"/>
+    <Bug category="I18N"/>
+    <Class name="~eu.slipo.workflows.examples.mergesort\.[^.]+"/>
+    <Class name="eu.slipo.workflows.examples.mergesort.SplitFileTasklet"/>
+  </And>
+  <And>
+    <Class name="eu.slipo.workflows.Workflow$Builder"/>
+    <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+    <Bug code="NP"/>
+    <Bug category="STYLE"/>
+    <Class name="~eu.slipo.workflows\.[^.]+"/>
+  </And>
+  <And>
+    <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+    <Class name="eu.slipo.workflows.tasklet.CopyOutputTasklet"/>
+    <Bug code="NP"/>
+    <Bug category="STYLE"/>
+    <Class name="~eu.slipo.workflows.tasklet\.[^.]+"/>
+  </And>
+  <And>
+    <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+    <Class name="eu.slipo.workflows.tasklet.ExportExecutionContextTasklet"/>
+    <Bug code="NP"/>
+    <Bug category="STYLE"/>
+    <Class name="~eu.slipo.workflows.tasklet\.[^.]+"/>
+  </And>
+</FindBugsFilter>

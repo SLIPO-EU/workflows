@@ -99,7 +99,7 @@ public class ImportExecutionContextTasklet implements Tasklet
             map = cache.get(sourcePath);
         } catch (ExecutionException e) {
             throw new IllegalStateException(
-                String.format("Failed to load context map from {}", sourcePath), 
+                String.format("Failed to load context map from %s", sourcePath), 
                 e.getCause());
         }
         
