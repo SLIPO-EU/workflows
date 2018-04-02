@@ -16,14 +16,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.regex.Pattern;
-import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -38,8 +36,6 @@ import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.job.builder.FlowBuilder;
 import org.springframework.batch.core.job.flow.Flow;
-import org.springframework.batch.core.step.tasklet.Tasklet;
-import org.springframework.data.util.Pair;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -76,15 +72,9 @@ public class Workflow
     public static final String WORKFLOW_PARAMETER_NAME = "workflow";
     
     /**
-     * The default listener key is for listening to events from the entire workflow
-     * (i.e. not a specific job node). This key should not conflict with any legal node name.
-     */
-    private static final String DEFAULT_LISTENER_KEY = ".";
-    
-    /**
      * The default key for an input of a job node (representing an anonymous input).
      */
-    private static final String DEFAULT_INPUT_KEY = ".";
+    public static final String DEFAULT_INPUT_KEY = ".";
 
     /**
      * Represent a result produced by a job of a workflow.
@@ -1051,7 +1041,13 @@ public class Workflow
             return Workflow.this;
         }
     }
- 
+
+    /**
+     * The default listener key is for listening to events from the entire workflow
+     * (i.e. not a specific job node). This key should not conflict with any legal node name.
+     */
+    private static final String DEFAULT_LISTENER_KEY = ".";
+    
     /**
      * A builder for a {@link Workflow}
      */
@@ -1235,8 +1231,8 @@ public class Workflow
             
             for (URI uri: inputUris) {
                 final Result res = Result.parse(uri);
-                final String pattern = res.outputPath().toString();
-                if (res != null && pathMatcher.isPattern(pattern)) {
+                final String pattern = res == null? null : res.outputPath().toString();
+                if (pattern != null && pathMatcher.isPattern(pattern)) {
                     // Expand to matching outputs from our dependency node
                     JobDefinition dependency = definitionByName(res.nodeName());
                     for (Path path: dependency.output()) {
