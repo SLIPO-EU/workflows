@@ -392,6 +392,52 @@ public class WorkflowBuilderTests
         workflow1.outputUris().put("foo.txt", URI.create("file:///tmp/baz.txt"));
     }
     
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA1()
+    {
+        workflow1.node("alpha").inputMap()
+            .put("foo", Collections.singletonList(Paths.get("foo-1.txt")));
+    }
+    
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA2()
+    {
+        final String defaultInputKey = Workflow.DEFAULT_INPUT_KEY;
+        workflow1.node("alpha").inputMap()
+            .put(defaultInputKey, Collections.singletonList(Paths.get("other.txt")));
+    }
+    
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA3()
+    {
+        final String defaultInputKey = Workflow.DEFAULT_INPUT_KEY;
+        workflow1.node("alpha").inputMap().remove(defaultInputKey);
+    }
+    
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA4()
+    {
+        final String defaultInputKey = Workflow.DEFAULT_INPUT_KEY;
+        workflow1.node("alpha").inputMap()
+            .get(defaultInputKey).add(Paths.get("more.txt"));
+    }
+    
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA5()
+    {
+        final String defaultInputKey = Workflow.DEFAULT_INPUT_KEY;
+        workflow1.node("alpha").inputMap()
+            .get(defaultInputKey).set(0, Paths.get("another.txt"));
+    }
+    
+    @Test(expected = UnsupportedOperationException.class) 
+    public void test1_checkUnmodifiableInputMapA6()
+    {
+        final String defaultInputKey = Workflow.DEFAULT_INPUT_KEY;
+        workflow1.node("alpha").inputMap()
+            .get(defaultInputKey).clear();
+    }
+    
     @Test
     public void test1_checkNodesInTopologicalOrder()
     {

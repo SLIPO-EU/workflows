@@ -40,6 +40,8 @@ import org.springframework.util.AntPathMatcher;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
+import com.google.common.collect.Maps;
+
 import eu.slipo.workflows.tasklet.CopyOutputTasklet;
 import eu.slipo.workflows.tasklet.ExportExecutionContextTasklet;
 import eu.slipo.workflows.tasklet.ImportExecutionContextTasklet;
@@ -301,6 +303,7 @@ public class Workflow
             return def;
         }
        
+        @SuppressWarnings("unused")
         private JobDefinition withOutput(List<Path> output)
         {
             JobDefinition def = new JobDefinition(this.name, this.flow);
@@ -339,7 +342,8 @@ public class Workflow
  
         public List<URI> input()
         {
-            return inputMap.values().stream()
+            return inputMap.values()
+                .stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
         }
@@ -747,12 +751,12 @@ public class Workflow
                 
             JobDefinition def = new JobDefinition(this.name, this.flow);
             
-            final Map<String, List<URI>> input = 
+            final Map<String, List<URI>> inputMap = 
                 (this.inputMap.size() > 3)? (new HashMap<>()) : (new Flat3Map<>()); 
             this.inputMap.forEach((inputKey, uris) -> {
-                input.put(inputKey, new ArrayList<>(uris));
+                inputMap.put(inputKey, Collections.unmodifiableList(new ArrayList<>(uris)));
             });
-            def.inputMap = Collections.unmodifiableMap(input);
+            def.inputMap = Collections.unmodifiableMap(inputMap);
             
             def.parameters = this.parameters == null? (new JobParameters()) : this.parameters;
             def.output = Collections.unmodifiableList(new ArrayList<>(this.output));
@@ -885,7 +889,7 @@ public class Workflow
         
         /**
          * Get a map of our (expected) inputs as absolute filesystem paths. Each entry represents
-         * a logical group of inputs.
+         * a logical group of input paths.
          * 
          * <p>Note that the corresponding files may or may not exist: only when dependencies
          * are fulfilled, these files are expected to exist and to be readable.
@@ -893,9 +897,10 @@ public class Workflow
         public Map<String, List<Path>> inputMap()
         {
             final JobDefinition def = defs.get(vertex);
-            return def.inputMap().entrySet()
-                .stream()
-                .collect(Collectors.toMap(e -> e.getKey(), e -> convertUrisToPaths(e.getValue())));
+            // Note: No need to wrap as an unmodifiable map, since the underlying map of
+            // the returned view is regarded (and should be) unmodifiable
+            return Maps.transformValues(
+                def.inputMap, uris -> Collections.unmodifiableList(transformUrisToPaths(uris)));
         }
         
         /**
@@ -906,17 +911,17 @@ public class Workflow
         public List<Path> input()
         {
             final JobDefinition def = defs.get(vertex);
-            return def.inputMap().values()
+            return def.inputMap.values()
                 .stream()
-                .map(uris -> convertUrisToPaths(uris))
+                .map(uris -> transformUrisToPaths(uris))
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
         }
         
-        private List<Path> convertUrisToPaths(List<URI> inputUris)
+        private List<Path> transformUrisToPaths(List<URI> inputUris)
         {
             return inputUris.stream()
-                .map(uri -> convertUriToAbsolutePath(uri))
+                .map(uri -> transformUriToAbsolutePath(uri))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
         }
@@ -1414,7 +1419,7 @@ public class Workflow
     }
     
     /**
-     * Map a URI to an absolute file path.
+     * Transform a URI to an absolute file path.
      * 
      * <p>This method may return <tt>null</tt> in case a uri is a result (res://) URI
      * with an empty path (which is legal for this kind of URIs). 
@@ -1424,7 +1429,7 @@ public class Workflow
      * 
      * @see Result
      */
-    private Path convertUriToAbsolutePath(URI uri)
+    private Path transformUriToAbsolutePath(URI uri)
     {
         Path path = null;
         String scheme = uri.getScheme();
