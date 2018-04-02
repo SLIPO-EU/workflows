@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -22,11 +23,13 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.regex.Pattern;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.collections4.map.Flat3Map;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.JobParameters;
@@ -62,35 +65,27 @@ public class Workflow
     public static final String OUTPUT_DIR = "output";
     
     /**
-     * An enumeration of job parameters reserved for use in a workflow.
-     * <p>The following parameters will be overwritten when an actual parameters map
-     * (for a job node) is built.   
+     * The (reserved) name for a parameter holding a colon-separated list of input paths.
      */
-    public static enum Parameter 
-    {
-        /**
-         * This parameter will hold the colon-separated list of input file paths.  
-         */
-        INPUT("input"),
-        
-        /**
-         * This parameter will hold the UUID of the workflow that a job is part of.
-         */
-        WORKFLOW("workflow");
-        
-        private final String key;
-        
-        private Parameter(String key)
-        {
-            this.key = key;
-        }
-        
-        public String key()
-        {
-            return key;
-        }
-    }
+    public static final String INPUT_PARAMETER_NAME = "input";
     
+    /**
+     * The (reserved) name for a parameter holding the UUID of the workflow that a job 
+     * is part of.
+     */
+    public static final String WORKFLOW_PARAMETER_NAME = "workflow";
+    
+    /**
+     * The default listener key is for listening to events from the entire workflow
+     * (i.e. not a specific job node). This key should not conflict with any legal node name.
+     */
+    private static final String DEFAULT_LISTENER_KEY = ".";
+    
+    /**
+     * The default key for an input of a job node (representing an anonymous input).
+     */
+    private static final String DEFAULT_INPUT_KEY = ".";
+
     /**
      * Represent a result produced by a job of a workflow.
      */
@@ -267,7 +262,7 @@ public class Workflow
         private JobParameters parameters;
         
         /** 
-         * The list of inputs for this job.
+         * A map of inputs (keyed to a group) for this job.
          * 
          * <p>These inputs are given as URIs in one of the following formats:
          * <ul>
@@ -279,7 +274,7 @@ public class Workflow
          * 
          *  @see {@link Result}
          */
-        private List<URI> input;
+        private Map<String, List<URI>> inputMap;
         
         /**
          * A list of output files (relative to this job's output directory) that should be copied
@@ -305,10 +300,10 @@ public class Workflow
             this.flow = flow;
         }
 
-        private JobDefinition withInput(List<URI> input)
+        private JobDefinition withInput(Map<String, List<URI>> input)
         {
             JobDefinition def = new JobDefinition(this.name, this.flow);
-            def.input = Collections.unmodifiableList(input);
+            def.inputMap = input;
             def.output = this.output;
             def.parameters = this.parameters;
             def.exportedKeys = this.exportedKeys;
@@ -319,8 +314,8 @@ public class Workflow
         private JobDefinition withOutput(List<Path> output)
         {
             JobDefinition def = new JobDefinition(this.name, this.flow);
-            def.input = this.input;
-            def.output = Collections.unmodifiableList(output);
+            def.inputMap = this.inputMap;
+            def.output = output;
             def.parameters = this.parameters;
             def.exportedKeys = this.exportedKeys;
             def.contextMap = this.contextMap;
@@ -347,11 +342,18 @@ public class Workflow
             return parameters;
         }
 
+        public Map<String, List<URI>> inputMap()
+        {
+            return inputMap;
+        }
+ 
         public List<URI> input()
         {
-            return input;
+            return inputMap.values().stream()
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
         }
-
+        
         public List<Path> output()
         {
             return output;
@@ -371,7 +373,7 @@ public class Workflow
         public String toString()
         {
             return String.format(
-                "JobDefinition [name=%s, input=%s, output=%s]", name, input, output);
+                "JobDefinition [name=%s, input=%s, output=%s]", name, inputMap, output);
         }
     }
     
@@ -384,8 +386,12 @@ public class Workflow
          * The pattern that a name part must conform to. A name may consist of several 
          * dot-delimited parts (e.g. "aggregator.q1").
          */
-        public static final Pattern namePartPattern = 
-            Pattern.compile("^[a-z0-9][-_a-z0-9]*$", Pattern.CASE_INSENSITIVE);
+        public static final Pattern namePartPattern = Pattern.compile("^[a-zA-Z][-\\w]*$");
+        
+        /**
+         * The pattern that an input key must conform to.
+         */
+        public static final Pattern inputKeyPattern = Pattern.compile("^[a-zA-Z][\\w]*$");
         
         private String name;
         
@@ -393,7 +399,7 @@ public class Workflow
         
         private JobParameters parameters;
         
-        private List<URI> input = new ArrayList<>();
+        private Map<String, Set<URI>> inputMap = new HashMap<>();
         
         private List<Path> output = new ArrayList<>();
         
@@ -425,7 +431,7 @@ public class Workflow
             String[] nameParts = name.split(Pattern.quote("."));
             Assert.isTrue(Arrays.stream(nameParts)
                     .allMatch(part -> namePartPattern.matcher(part).matches()), 
-                "The given name is not valid");
+                "The given name is invalid");
             this.name = name;
             return this;
         }
@@ -530,13 +536,24 @@ public class Workflow
         public JobDefinitionBuilder input(Path path)
         {
             Assert.isTrue(path != null && path.isAbsolute(), "Expected a non-null absolute file path");
-            this.input.add(path.toUri());
+            this.addInput(DEFAULT_INPUT_KEY, path.toUri());
             return this;
         }
         
-        public JobDefinitionBuilder input(String path)
+        /**
+         * Add another input file (external to a workflow). The input will be logically grouped under 
+         * a given input key.
+         * 
+         * @param path An absolute file path
+         * @param inputKey
+         */
+        public JobDefinitionBuilder input(Path path, String inputKey)
         {
-            return input(Paths.get(path));
+            Assert.isTrue(path != null && path.isAbsolute(), "Expected a non-null absolute file path");
+            Assert.isTrue(!StringUtils.isEmpty(inputKey), "Expected a non-empty input key");
+            Assert.isTrue(inputKeyPattern.matcher(inputKey).matches(), "The input key is invalid");
+            this.addInput(inputKey, path.toUri());
+            return this;
         }
         
         /**
@@ -551,19 +568,46 @@ public class Workflow
         public JobDefinitionBuilder input(String dependencyName, Path path)
         {
             Assert.notNull(dependencyName, "Expected a non-null name for a job node");
-            Assert.notNull(path, "Expected a non-null node-relative path for a result");
+            Assert.isTrue(path != null && !path.isAbsolute(), 
+                "Expected a non-null node-relative path for a result");
             Result result = Result.of(dependencyName, path);
-            URI resultUri = result.toUri();
-            if (!this.input.contains(resultUri)) 
-                this.input.add(resultUri);
+            this.addInput(DEFAULT_INPUT_KEY, result.toUri());
             return this;
         }
         
         public JobDefinitionBuilder input(String dependencyName, String path)
         {
-            return input(dependencyName, Paths.get(path));
+            return this.input(dependencyName, Paths.get(path));
         }
-                
+        
+        /**
+         * Add another input file as an expected (i.e. promised) result from a job we depend on. The input
+         * will be logically grouped under a given input key.
+         * 
+         * @param dependencyName The name of the job node that we depend on (and must precede)
+         * @param path A path that will be resolved relative to the output directory of the
+         *   dependency.
+         * @param inputKey
+         * 
+         * @see JobDefinitionBuilder#input(String, Path)
+         */
+        public JobDefinitionBuilder input(String dependencyName, Path path, String inputKey)
+        {
+            Assert.notNull(dependencyName, "Expected a non-null name for a job node");
+            Assert.isTrue(path != null && !path.isAbsolute(), 
+                "Expected a non-null node-relative path for a result");
+            Assert.isTrue(!StringUtils.isEmpty(inputKey), "Expected a non-empty input key");
+            Assert.isTrue(inputKeyPattern.matcher(inputKey).matches(), "The input key is invalid");
+            Result result = Result.of(dependencyName, path);
+            this.addInput(inputKey, result.toUri());
+            return this;
+        }
+        
+        public JobDefinitionBuilder input(String dependencyName, String path, String inputKey)
+        {
+            return this.input(dependencyName, Paths.get(path), inputKey);
+        }
+        
         /**
          * Add a bunch of dependencies having a common relative (to dependency) path.
          * 
@@ -572,7 +616,6 @@ public class Workflow
          *   
          * @param dependencyNames A collection of dependencies
          * @param path The common dependency-relative path
-         * @return
          */
         public JobDefinitionBuilder input(Collection<String> dependencyNames, Path path)
         {
@@ -581,14 +624,30 @@ public class Workflow
             return this;
         }
         
-        /**
-         * @see {@link JobDefinitionBuilder#input(Collection, Path)}
-         * @param dependencyNames
-         * @param path
-         */
         public JobDefinitionBuilder input(Collection<String> dependencyNames, String path)
         {
-            return input(dependencyNames, Paths.get(path));
+            return this.input(dependencyNames, Paths.get(path));
+        }
+        
+        /**
+         * @see JobDefinitionBuilder#input(Collection, Path)
+         */
+        public JobDefinitionBuilder input(Collection<String> dependencyNames, Path path, String inputKey)
+        {
+            for (String dependencyName: dependencyNames)
+                input(dependencyName, path, inputKey);
+            return this;
+        }
+        
+        public JobDefinitionBuilder input(Collection<String> dependencyNames, String path, String inputKey)
+        {
+            return this.input(dependencyNames, Paths.get(path), inputKey);
+        }
+        
+        private void addInput(String inputKey, URI uri)
+        {
+            this.inputMap.computeIfAbsent(inputKey, k -> new LinkedHashSet<>())
+                .add(uri);
         }
         
         /**
@@ -602,7 +661,7 @@ public class Workflow
          */
         public JobDefinitionBuilder after(String dependencyName)
         {
-            return input(dependencyName, ".");
+            return input(dependencyName, Paths.get("."));
         }
         
         /**
@@ -697,11 +756,19 @@ public class Workflow
             Assert.state(this.flow != null, "A trunk flow is required for a job");
                 
             JobDefinition def = new JobDefinition(this.name, this.flow);
+            
+            final Map<String, List<URI>> input = 
+                (this.inputMap.size() > 3)? (new HashMap<>()) : (new Flat3Map<>()); 
+            this.inputMap.forEach((inputKey, uris) -> {
+                input.put(inputKey, new ArrayList<>(uris));
+            });
+            def.inputMap = Collections.unmodifiableMap(input);
+            
             def.parameters = this.parameters == null? (new JobParameters()) : this.parameters;
-            def.input = new ArrayList<>(this.input);
-            def.output = new ArrayList<>(this.output);
-            def.exportedKeys = new HashSet<>(this.exportedKeys);
-            def.contextMap = new HashMap<>(this.contextMap);
+            def.output = Collections.unmodifiableList(new ArrayList<>(this.output));
+            def.exportedKeys = Collections.unmodifiableSet(new HashSet<>(this.exportedKeys));
+            def.contextMap = Collections.unmodifiableMap(new HashMap<>(this.contextMap));
+            
             return def;
         }
     }
@@ -809,25 +876,56 @@ public class Workflow
         public JobParameters parameters()
         {
             final JobDefinition def = defs.get(vertex);
-            final List<Path> input = input();
-            final String pathSeparator = File.pathSeparator;
-            return new JobParametersBuilder(def.parameters())
-                .addString(Parameter.WORKFLOW.key, id.toString())
-                .addString(Parameter.INPUT.key, input.stream()
-                    .collect(Collectors.mapping(Path::toString, Collectors.joining(pathSeparator))))
-                .toJobParameters();
+            
+            final JobParametersBuilder parametersBuilder = new JobParametersBuilder(def.parameters());
+            
+            parametersBuilder.addString(WORKFLOW_PARAMETER_NAME, id.toString());
+            
+            this.inputMap().forEach((inputKey, inputPaths) -> {
+                final String parameterName = inputKey.equals(DEFAULT_INPUT_KEY)?
+                    INPUT_PARAMETER_NAME : (INPUT_PARAMETER_NAME + "." + inputKey);
+                final String parameterValue = inputPaths.stream()
+                    .map(Path::toString)
+                    .collect(Collectors.joining(File.pathSeparator));
+                parametersBuilder.addString(parameterName, parameterValue);
+            });
+            
+            return parametersBuilder.toJobParameters();
+        }
+        
+        /**
+         * Get a map of our (expected) inputs as absolute filesystem paths. Each entry represents
+         * a logical group of inputs.
+         * 
+         * <p>Note that the corresponding files may or may not exist: only when dependencies
+         * are fulfilled, these files are expected to exist and to be readable.
+         */
+        public Map<String, List<Path>> inputMap()
+        {
+            final JobDefinition def = defs.get(vertex);
+            return def.inputMap().entrySet()
+                .stream()
+                .collect(Collectors.toMap(e -> e.getKey(), e -> convertUrisToPaths(e.getValue())));
         }
         
         /**
          * List our (expected) inputs as absolute filesystem paths.
          * 
-         * <p>Note that the corresponding files may or may not exist: only when dependencies
-         * are fulfilled, these files are expected to exist and to be readable.
+         * @see JobNode#inputMap()
          */
         public List<Path> input()
         {
             final JobDefinition def = defs.get(vertex);
-            return def.input().stream()
+            return def.inputMap().values()
+                .stream()
+                .map(uris -> convertUrisToPaths(uris))
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+        }
+        
+        private List<Path> convertUrisToPaths(List<URI> inputUris)
+        {
+            return inputUris.stream()
                 .map(uri -> convertUriToAbsolutePath(uri))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -954,12 +1052,6 @@ public class Workflow
         }
     }
  
-    /**
-     * The default listener key is for listening to events from the entire workflow
-     * (i.e. not a specific job node). This key should not conflict with any legal node name.
-     */
-    private static final String DEFAULT_LISTENER_KEY = "_global";
-    
     /**
      * A builder for a {@link Workflow}
      */
@@ -1119,42 +1211,53 @@ public class Workflow
         {
             // Check if any glob-style inputs are present in this job definition
             
-            boolean shouldExpand = def.input().stream()
+            boolean shouldExpand = def.inputMap().values().stream()
+                .flatMap(List::stream)
                 .map(Result::parse)
-                .anyMatch(res -> res != null && pathMatcher.isPattern(res.outputPath().toString()));
+                .filter(Objects::nonNull)
+                .anyMatch(res -> pathMatcher.isPattern(res.outputPath().toString()));
             
             if (!shouldExpand)
                 return def;
             
             // The definition contains input with glob-style wildcards to be expanded
             
-            List<URI> input = new ArrayList<>();
-            for (URI uri: def.input()) {
+            Map<String, List<URI>> input = def.inputMap().entrySet()
+                .stream()
+                .collect(Collectors.toMap(e -> e.getKey(), e -> expandInput(e.getValue())));
+            
+            return def.withInput(Collections.unmodifiableMap(input));
+        }
+        
+        private List<URI> expandInput(List<URI> inputUris)
+        {            
+            final List<URI> expandedUris = new ArrayList<>();
+            
+            for (URI uri: inputUris) {
                 final Result res = Result.parse(uri);
-                if (res != null && pathMatcher.isPattern(res.outputPath().toString())) {
-                    // Expand to matching outputs from our dependency
-                    final JobDefinition dependency = defByName(res.nodeName());
-                    final String pattern = res.outputPath().toString();
-                    Assert.state(dependency != null, String.format(
-                        "No job named as [%s]", res.nodeName()));
-                    List<URI> expandedUris = dependency.output().stream()
-                        .filter(p -> pathMatcher.match(pattern, p.toString()))
-                        .map(p -> Result.of(res.nodeName(), p).toUri())
-                        .collect(Collectors.toList());
-                    input.addAll(expandedUris);
+                final String pattern = res.outputPath().toString();
+                if (res != null && pathMatcher.isPattern(pattern)) {
+                    // Expand to matching outputs from our dependency node
+                    JobDefinition dependency = definitionByName(res.nodeName());
+                    for (Path path: dependency.output()) {
+                        if (pathMatcher.match(pattern, path.toString())) {
+                            expandedUris.add(Result.of(res.nodeName(), path).toUri());
+                        }
+                    }
                 } else {
-                    input.add(uri);
+                    expandedUris.add(uri);
                 }
             }
             
-            return def.withInput(input);
+            return expandedUris;
         }
         
-        private JobDefinition defByName(String name)
+        private JobDefinition definitionByName(String name)
         {
             return this.defs.stream()
                 .filter(y -> y.name().equals(name))
-                .findFirst().orElse(null);
+                .findFirst()
+                .get();
         }
         
         public Workflow build()

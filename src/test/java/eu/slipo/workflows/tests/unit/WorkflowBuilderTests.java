@@ -239,9 +239,9 @@ public class WorkflowBuilderTests
             assertNotNull("A node is expected to have a job name", jobName);
             assertNotNull("A node is expected to be associated to Batch flow", flow);
             assertNotNull("Expected a parameter fpr the workflow identifier", 
-                parameters.getString(Workflow.Parameter.WORKFLOW.key()));
-            List<Path> inputs = Arrays.stream(
-                    parameters.getString(Workflow.Parameter.INPUT.key()).split(File.pathSeparator))
+                parameters.getString(Workflow.WORKFLOW_PARAMETER_NAME));
+            final String inputAsString = parameters.getString(Workflow.INPUT_PARAMETER_NAME, "");
+            List<Path> inputs = Arrays.stream(inputAsString.split(File.pathSeparator))
                 .filter(s -> !s.isEmpty())
                 .map(s -> Paths.get(s))
                 .collect(Collectors.toList());
