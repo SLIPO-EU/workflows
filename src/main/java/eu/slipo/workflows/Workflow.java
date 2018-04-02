@@ -1278,12 +1278,13 @@ public class Workflow
             
             // Setup listeners
                         
-            Map<String, List<WorkflowExecutionListener>> listeners = null; 
+            
             if (!this.listeners.isEmpty()) {
-                listeners = this.listeners.entrySet().stream()
-                    .collect(Collectors.toMap(
-                        e -> e.getKey(),
-                        e -> Collections.unmodifiableList(new ArrayList<>(e.getValue()))));
+                final Map<String, List<WorkflowExecutionListener>> listeners = 
+                    this.listeners.size() > 3? (new HashMap<>()) : (new Flat3Map<>());
+                this.listeners.forEach((key, handlers) -> {
+                    listeners.put(key, Collections.unmodifiableList(new ArrayList<>(handlers)));
+                });
                 workflow.setListeners(Collections.unmodifiableMap(listeners));
             }
             
