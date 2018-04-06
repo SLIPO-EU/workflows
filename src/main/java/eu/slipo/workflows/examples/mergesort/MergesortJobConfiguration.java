@@ -28,6 +28,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.util.Assert;
 
 import eu.slipo.workflows.ExecutionContextPromotionListeners;
+import eu.slipo.workflows.util.tasklet.SplitFileTasklet;
 
 @Configuration("mergesort.jobConfiguration")
 public class MergesortJobConfiguration

@@ -30,8 +30,8 @@ public class SortFileTasklet implements Tasklet
     
     public SortFileTasklet(Path inputPath, Path outputDir, String outputName)
     {
-        Assert.isTrue(Files.isRegularFile(inputPath) && Files.isReadable(inputPath), 
-            "The input path must point to a readable file");
+        Assert.isTrue(inputPath != null && inputPath.isAbsolute(), 
+            "The input must be given an a non-empty absolute path");
         Assert.isTrue(outputDir != null && outputDir.isAbsolute(), 
             "The output directory must be given as an absolute path");
         Assert.isTrue(!StringUtils.isEmpty(outputName), 
@@ -47,6 +47,9 @@ public class SortFileTasklet implements Tasklet
     {
         StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
         ExecutionContext executionContext = stepExecution.getExecutionContext();
+        
+        Assert.state(Files.isRegularFile(inputPath) && Files.isReadable(inputPath), 
+            "The input path is not readable");
         
         // Create output directory
         try {

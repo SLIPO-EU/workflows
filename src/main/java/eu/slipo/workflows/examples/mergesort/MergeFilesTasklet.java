@@ -2,6 +2,7 @@ package eu.slipo.workflows.examples.mergesort;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -29,7 +30,7 @@ import org.springframework.util.StringUtils;
  */
 public class MergeFilesTasklet implements Tasklet
 {
-    private static Logger logger = LoggerFactory.getLogger(MergeFilesTasklet.class);
+    private static final Logger logger = LoggerFactory.getLogger(MergeFilesTasklet.class);
     
     private final List<Path> inputPaths;
     
@@ -41,11 +42,8 @@ public class MergeFilesTasklet implements Tasklet
     {
         Assert.isTrue(outputDir != null && outputDir.isAbsolute(), 
             "Expected an absolute path for output directory");
-        Assert.isTrue(!StringUtils.isEmpty(outputName), 
-            "An output name is required");
+        Assert.isTrue(!StringUtils.isEmpty(outputName), "An output name is required");
         Assert.isTrue(inputPaths.length >= 2, "Expected at least 2 files to merge");
-        Assert.isTrue(Arrays.stream(inputPaths).allMatch(Files::isReadable), 
-            "Expected a list of readable files");
         this.inputPaths = new ArrayList<>(Arrays.asList(inputPaths));
         this.outputDir = outputDir;
         this.outputName = outputName;
@@ -201,13 +199,16 @@ public class MergeFilesTasklet implements Tasklet
         StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
         ExecutionContext executionContext = stepExecution.getExecutionContext();
         
+        Assert.state(inputPaths.stream().allMatch(Files::isReadable), 
+            "Expected a list of readable files");
+        
         final Path outputPath = outputDir.resolve(outputName);
         
         // Create output directory
         try {
             Files.createDirectory(outputDir);
             logger.debug("Created output directory at {}", outputDir);
-        } catch (IOException ex) {
+        } catch (FileAlreadyExistsException ex) {
             // no-op
         }
         
