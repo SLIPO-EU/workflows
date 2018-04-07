@@ -77,6 +77,7 @@ import eu.slipo.workflows.tests.JobDataConfiguration;
 import eu.slipo.workflows.tests.TaskExecutorConfiguration;
 import eu.slipo.workflows.tests.WorkflowBuilderFactoryConfiguration;
 import eu.slipo.workflows.tests.WorkflowSchedulerConfiguration;
+import eu.slipo.workflows.tests.integration.BaseWorkflowSchedulerTests;
 
 @RunWith(SpringRunner.class)
 @EnableAutoConfiguration
@@ -91,7 +92,7 @@ import eu.slipo.workflows.tests.WorkflowSchedulerConfiguration;
         MergesortJobConfiguration.class,
         MergesortWorkflows.class
     })
-public class WorkflowSchedulerTests
+public class WorkflowSchedulerTests extends BaseWorkflowSchedulerTests
 {
     private static Logger logger = LoggerFactory.getLogger(WorkflowSchedulerTests.class);
     
@@ -162,20 +163,18 @@ public class WorkflowSchedulerTests
     public static void setUpBeforeClass() throws Exception
     {
         final Path fixturePath = Paths.get("testcases/integration/mergesort");
-        Class<? extends WorkflowSchedulerTests> cls = WorkflowSchedulerTests.class;
         
         // Add fixtures from src/test/resources
         
         fixtures.add(new Fixture(
-            cls.getResource("/" + fixturePath.resolve("1.txt").toString()),
-            cls.getResource("/" + fixturePath.resolve("1-sorted.txt").toString())));
+            getResource(fixturePath.resolve("1.txt")),
+            getResource(fixturePath.resolve("1-sorted.txt"))));
         
         fixtures.add(new Fixture(
-            cls.getResource("/" + fixturePath.resolve("2.txt").toString()),
-            cls.getResource("/" + fixturePath.resolve("2-sorted.txt").toString())));
+            getResource(fixturePath.resolve("2.txt")),
+            getResource(fixturePath.resolve("2-sorted.txt"))));
         
         // Add randomly generated fixtures
-        
         
         for (long sampleSize: Arrays.asList(1000 * 1000L, 3000 * 1000L)) 
         {
@@ -216,20 +215,9 @@ public class WorkflowSchedulerTests
     }
     
     @AfterClass
-    public static void tearDownAfterClass() throws Exception
-    {
-    }
+    public static void tearDownAfterClass() throws Exception {}
     
     private static List<Fixture> fixtures = new ArrayList<>();
-    
-    @Autowired
-    private TaskExecutor taskExecutor;
-    
-    @Autowired
-    private JobRepository jobRepository;
-    
-    @Autowired
-    private WorkflowScheduler workflowScheduler;
     
     @Autowired
     private WorkflowBuilderFactory workflowBuilderFactory;
@@ -263,92 +251,16 @@ public class WorkflowSchedulerTests
     @After
     public void tearDown() throws Exception {}
     
-    private void startAndWaitToComplete(Workflow workflow, Path expectedResultPath) 
-        throws Exception
+    @Override
+    protected void info(String msg, Object... args)
     {
-        startAndWaitToComplete(Collections.singletonMap(workflow, expectedResultPath));
+        logger.info(msg, args);
     }
-    
-    private void startAndWaitToComplete(Map<Workflow,Path> workflowToResult) 
-        throws Exception
-    {        
-        final int n = workflowToResult.size();
-        final CountDownLatch done = new CountDownLatch(n);
-        
-        WorkflowExecutionCompletionListener callback = new WorkflowExecutionCompletionListenerSupport()
-        {
-            @Override
-            public void onSuccess(WorkflowExecutionSnapshot workflowExecutionSnapshot)
-            {
-                final Workflow workflow = workflowExecutionSnapshot.workflow();
-                logger.info("The workflow {} finished successfully", workflow.id());
-                done.countDown();
-            }
-        };
-        
-        Random rng = new Random();
-        
-        for (Workflow workflow: workflowToResult.keySet()) {
-            taskExecutor.execute(new Runnable() 
-            {
-                @Override
-                public void run()
-                {
-                    // Simulate some random delay
-                    
-                    try {
-                        Thread.sleep(50L + rng.nextInt(100));
-                    } catch (InterruptedException ex) {
-                        ex.printStackTrace();
-                        throw new IllegalStateException(ex);
-                    }
-                    
-                    // Submit workflow
-                    
-                    try {
-                        workflowScheduler.start(workflow, callback);
-                    } catch (WorkflowExecutionStartException ex) {
-                        ex.printStackTrace();
-                        throw new IllegalStateException(ex);
-                    }
-                }
-            });
-        }
-        
-        // Wait for everyone
-        
-        done.await();
-      
-        // Test status of completed workflows
-        
-        for (Workflow workflow: workflowToResult.keySet()) {
-            WorkflowScheduler.ExecutionSnapshot snapshot = workflowScheduler.poll(workflow.id());
-            WorkflowExecutionSnapshot workflowExecutionSnapshot = snapshot.workflowExecutionSnapshot();
-            assertTrue(workflowExecutionSnapshot.isComplete());
-            assertEquals(WorkflowExecutionStatus.COMPLETED, snapshot.status());
-        }
-        
-        // Test results
-        
-        for (Map.Entry<Workflow,Path> e: workflowToResult.entrySet()) {
-            final Workflow workflow = e.getKey();
-            final Path expectedResultPath = e.getValue();
-            
-            Map<String, Path> outputMap = workflow.output();
-            Path resultPath = outputMap.get(RESULT_FILENAME);
-            logger.info("The workflow {} is finished (result at {})", workflow.id(), resultPath);
-            
-            assertTrue("Expected output result to be a readable file", 
-                Files.isRegularFile(resultPath) && Files.isReadable(resultPath));
-            
-            assertFileEquals(expectedResultPath.toFile(), resultPath.toFile());
-            
-            // Test node status
-            
-            WorkflowExecution workflowExecution = new WorkflowExecution(workflow);
-            workflowExecution.load(jobRepository);
-            assertTrue(workflowExecution.isComplete());
-        }
+
+    @Override
+    protected void warn(String msg, Object... args)
+    {
+        logger.warn(msg, args);
     }
     
     //
@@ -362,7 +274,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(80).mergeIn(5)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -372,7 +284,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(80).mergeIn(5)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -382,7 +294,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(30).mergeIn(5)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -392,7 +304,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(30).mergeIn(5)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -402,7 +314,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(25).mergeIn(2)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -412,7 +324,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(25).mergeIn(2)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -422,7 +334,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(10).mergeIn(2)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -432,7 +344,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(10).mergeIn(2)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -442,7 +354,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(30).mergeIn(10)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -452,7 +364,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(30).mergeIn(10)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -462,7 +374,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(80).mergeIn(3)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -472,7 +384,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(80).mergeIn(10)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -482,7 +394,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(80).mergeIn(3)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 60 * 1000L)
@@ -492,7 +404,7 @@ public class WorkflowSchedulerTests
         Workflow workflow = mergesortWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
             .numParts(150).mergeIn(10)
             .build();
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
     }
     
     @Test(timeout = 150 * 1000L)
@@ -503,75 +415,75 @@ public class WorkflowSchedulerTests
         Fixture f3 = fixtures.get(2);
         Fixture f4 = fixtures.get(3);
         
-        Map<Workflow, Path> workflowToResult = new HashMap<>();
+        Map<Workflow, Result> workflowToResult = new HashMap<>();
         
         // f1
         
         Workflow w1a = mergesortWorkflows.getBuilder(UUID.randomUUID(), f1.inputPath)
             .numParts(90).mergeIn(5)
             .build();
-        workflowToResult.put(w1a, f1.expectedResultPath);
+        workflowToResult.put(w1a, Result.of(RESULT_FILENAME, f1.expectedResultPath));
         
         Workflow w1b = mergesortWorkflows.getBuilder(UUID.randomUUID(), f1.inputPath)
             .numParts(90).mergeIn(8)
             .build();
-        workflowToResult.put(w1b, f1.expectedResultPath);
+        workflowToResult.put(w1b, Result.of(RESULT_FILENAME, f1.expectedResultPath));
         
         Workflow w1c = mergesortWorkflows.getBuilder(UUID.randomUUID(), f1.inputPath)
             .numParts(180).mergeIn(12)
             .build();
-        workflowToResult.put(w1c, f1.expectedResultPath);
+        workflowToResult.put(w1c, Result.of(RESULT_FILENAME, f1.expectedResultPath));
 
         // f2
         
         Workflow w2a = mergesortWorkflows.getBuilder(UUID.randomUUID(), f2.inputPath)
             .numParts(50).mergeIn(5)
             .build();
-        workflowToResult.put(w2a, f2.expectedResultPath);
+        workflowToResult.put(w2a, Result.of(RESULT_FILENAME, f2.expectedResultPath));
         
         Workflow w2b = mergesortWorkflows.getBuilder(UUID.randomUUID(), f2.inputPath)
             .numParts(50).mergeIn(12)
             .build();
-        workflowToResult.put(w2b, f2.expectedResultPath);
+        workflowToResult.put(w2b, Result.of(RESULT_FILENAME, f2.expectedResultPath));
         
         Workflow w2c = mergesortWorkflows.getBuilder(UUID.randomUUID(), f2.inputPath)
             .numParts(40).mergeIn(2)
             .build();
-        workflowToResult.put(w2c, f2.expectedResultPath);
+        workflowToResult.put(w2c, Result.of(RESULT_FILENAME, f2.expectedResultPath));
         
         // f3
         
         Workflow w3a = mergesortWorkflows.getBuilder(UUID.randomUUID(), f3.inputPath)
             .numParts(50).mergeIn(5)
             .build();
-        workflowToResult.put(w3a, f3.expectedResultPath);
+        workflowToResult.put(w3a, Result.of(RESULT_FILENAME, f3.expectedResultPath));
         
         Workflow w3b = mergesortWorkflows.getBuilder(UUID.randomUUID(), f3.inputPath)
             .numParts(50).mergeIn(12)
             .build();
-        workflowToResult.put(w3b, f3.expectedResultPath);
+        workflowToResult.put(w3b, Result.of(RESULT_FILENAME, f3.expectedResultPath));
         
         Workflow w3c = mergesortWorkflows.getBuilder(UUID.randomUUID(), f3.inputPath)
             .numParts(40).mergeIn(2)
             .build();
-        workflowToResult.put(w3c, f3.expectedResultPath);
+        workflowToResult.put(w3c, Result.of(RESULT_FILENAME, f3.expectedResultPath));
         
         // f4
         
         Workflow w4a = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
             .numParts(90).mergeIn(5)
             .build();
-        workflowToResult.put(w4a, f4.expectedResultPath);
+        workflowToResult.put(w4a, Result.of(RESULT_FILENAME, f4.expectedResultPath));
         
         Workflow w4b = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
             .numParts(150).mergeIn(5)
             .build();
-        workflowToResult.put(w4b, f4.expectedResultPath);
+        workflowToResult.put(w4b, Result.of(RESULT_FILENAME, f4.expectedResultPath));
         
         Workflow w4c = mergesortWorkflows.getBuilder(UUID.randomUUID(), f4.inputPath)
             .numParts(150).mergeIn(10)
             .build();
-        workflowToResult.put(w4c, f4.expectedResultPath);
+        workflowToResult.put(w4c, Result.of(RESULT_FILENAME, f4.expectedResultPath));
         
         // Submit workflows, expect results
         
@@ -655,7 +567,7 @@ public class WorkflowSchedulerTests
             .listener("splitter", splitListener)
             .build();
        
-        startAndWaitToComplete(workflow, f.expectedResultPath);
+        startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
         
         // Test listeners
         

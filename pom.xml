@@ -193,6 +193,7 @@
                     <skipITs>${integration-tests.skip}</skipITs>
                     <includes>
                         <include>eu.slipo.workflows.tests.integration.mergesort.*</include>
+                        <include>eu.slipo.workflows.tests.integration.frequent_itemsets.*</include>
                     </includes>
                 </configuration>
             </plugin>

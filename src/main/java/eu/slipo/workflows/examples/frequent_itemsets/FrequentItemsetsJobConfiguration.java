@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import javax.annotation.PostConstruct;
 
@@ -25,10 +27,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.util.Assert;
 
 import eu.slipo.workflows.ExecutionContextPromotionListeners;
+import eu.slipo.workflows.util.tasklet.ConcatenateFilesTasklet;
 import eu.slipo.workflows.util.tasklet.SplitFileTasklet;
 
 @Configuration("frequent_itemsets.jobConfiguration")
-public class FrequencyCounterJobConfiguration
+public class FrequentItemsetsJobConfiguration
 {
     @Autowired
     private StepBuilderFactory stepBuilderFactory;
@@ -40,9 +43,11 @@ public class FrequencyCounterJobConfiguration
     private void setupDataDirectories() throws IOException
     {
         String dirNames[] = new String[] {
+            "frequent_itemsets.splitFile",
+            "frequent_itemsets.concatenateFiles",
             "frequent_itemsets.countSingletonFrequencies", 
             "frequent_itemsets.countFrequencies",
-            "frequent_itemsets.mergeResults"
+            "frequent_itemsets.mergeFiles"
         };
         
         for (String dirName: dirNames) 
@@ -63,7 +68,7 @@ public class FrequencyCounterJobConfiguration
     @JobScope
     public Tasklet splitFileTasklet(
         @Value("#{jobParameters['input']}") String input,
-        @Value("#{jobParameters['outputPrefix']?:'p'}") String outputPrefix,
+        @Value("#{jobParameters['outputPrefix']?:'part'}") String outputPrefix,
         @Value("#{jobParameters['outputSuffix']?:'.dat'}") String outputSuffix,
         @Value("#{jobParameters['numParts']}") Number numParts,
         @Value("#{jobExecution.jobInstance.id}") Long jobId)
@@ -91,6 +96,40 @@ public class FrequencyCounterJobConfiguration
     public Flow splitFileFlow(@Qualifier("frequent_itemsets.splitFile.step") Step step)
     {
         return new FlowBuilder<Flow>("frequent_itemsets.splitFile").start(step).end();
+    }
+    
+    @Bean("frequent_itemsets.concatenateFiles.tasklet")
+    @JobScope
+    public Tasklet concatenateFilesTasklet(
+        @Value("#{jobParameters['input']}") String input,
+        @Value("#{jobParameters['outputName']}") String outputName,
+        @Value("#{jobExecution.jobInstance.id}") Long jobId)
+    {
+        final byte[] separator = "\n".getBytes();
+        
+        List<Path> inputPaths = Arrays.stream(input.split(File.pathSeparator))
+            .collect(Collectors.mapping(Paths::get, Collectors.toList()));
+
+        Path outputDir = jobDataDirectory.resolve(
+            Paths.get("frequent_itemsets.concatenateFiles", String.valueOf(jobId)));
+        return new ConcatenateFilesTasklet(inputPaths, outputDir, outputName, separator);
+    }
+
+    @Bean("frequent_itemsets.concatenateFiles.step")
+    public Step concatenateFilesStep(
+        @Qualifier("frequent_itemsets.concatenateFiles.tasklet") Tasklet tasklet,
+        @Qualifier("frequent_itemsets.contextPromotionListener") StepExecutionListener contextListener) 
+        throws Exception
+    {
+        return stepBuilderFactory.get("frequent_itemsets.concatenateFiles")
+            .tasklet(tasklet).listener(contextListener)
+            .build();
+    }
+    
+    @Bean("frequent_itemsets.concatenateFiles.flow")
+    public Flow concatenateFilesFlow(@Qualifier("frequent_itemsets.concatenateFiles.step") Step step)
+    {
+        return new FlowBuilder<Flow>("frequent_itemsets.concatenateFiles").start(step).end();
     }
     
     @Bean("frequent_itemsets.mergeFiles.tasklet")
