@@ -129,19 +129,80 @@ public class WorkflowSchedulerTests extends BaseWorkflowSchedulerTests
         logger.warn(msg, args);
     }
     
-    //
-    // Tests
-    //
-        
-    @Test // Fixme (timeout = 60 * 1000L)
-    public void testD1n4t50() throws Exception
+    private void testWithFixture(Fixture f, int numParts) throws Exception
     {
-        Fixture f = fixtures.get(Pair.of("retail", 50));
         Workflow workflow = frequentItemsetsWorkflows.getBuilder(UUID.randomUUID(), f.inputPath)
-            .numParts(4)
+            .numParts(numParts)
             .thresholdFrequency(f.thresholdFrequency)
             .maxSize(MAX_CARDINALITY)
             .build();
         startAndWaitToComplete(workflow, Result.of(RESULT_FILENAME, f.expectedResultPath));
-    } 
+    }  
+    
+    //
+    // Tests
+    //
+        
+    @Test(timeout = 60 * 1000L)
+    public void testD1n4t50() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("retail", 50));
+        testWithFixture(f, 4);
+    }  
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD1n4t20() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("retail", 20));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD1n4t10() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("retail", 10));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD1n4t05() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("retail", 5));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD2n4t50() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("kosarak", 50));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD2n4t20() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("kosarak", 20));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD2n4t10() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("kosarak", 10));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD2n4t05() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("kosarak", 5));
+        testWithFixture(f, 4);
+    }
+    
+    @Test(timeout = 60 * 1000L)
+    public void testD2n8t05() throws Exception
+    {
+        Fixture f = fixtures.get(Pair.of("kosarak", 5));
+        testWithFixture(f, 8);
+    }
 }

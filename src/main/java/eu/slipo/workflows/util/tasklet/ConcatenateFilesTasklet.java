@@ -67,7 +67,7 @@ public class ConcatenateFilesTasklet implements Tasklet
         Path output = outputDir.resolve(outputName);
 
         OpenOption[] outputOptions = new StandardOpenOption[] { 
-            StandardOpenOption.WRITE, StandardOpenOption.CREATE 
+            StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
         };
               
         try (OutputStream out = Files.newOutputStream(output, outputOptions)) {
