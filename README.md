@@ -24,14 +24,52 @@ The workflow scheduler analyzes dependencies and executes participating flows in
 
 In order for a Spring-Batch flow to participate in a workflow, it must adhere to the following requirements:
 
-  * must accept its input only via a `input` job parameter. This parameter must be encoded as a semicolon-separated list of absolute file paths.
+  * must accept its input only via an `input` or `input.<key>` job parameter. This parameter must be encoded as a semicolon-separated list of absolute file paths.
   * must publish an `outputDir` entry to its execution context. This entry must contain the absolute path of the job-wide output directory, and this will be used to resolve all outputs expected by this job node.      
 
-## Describe a workflow
+## Build a workflow
 
-__Todo__
+A workflow is built on top of Spring Batch flows. An example taken from project's tests:
+
+```java
+
+UUID workflowId = UUID.randomUUID();
+Workflow workflow = workflowBuilderFactory.get(workflowId)
+    .job(b -> b.name("splitter")
+        .flow(splitFileFlow)
+        .input(Paths.get("/tmp/input/numbers.txt"))
+        .parameters(p -> p.addLong("numParts", 2L)
+            .addString("outputPrefix", "part").addString("outputSuffix", ".txt"))
+        .output("part1.txt", "part2.txt"))
+    .job(b -> b.name("validator")
+        .flow(validatorStep)
+        .input("splitter", "part1.txt")
+        .input("splitter", "part2.txt"))
+    .job(b -> b.name("sorter-1")
+        .flow(sortFileFlow)
+        .after("validator")
+        .input("splitter", "part1.txt")
+        .parameters(p -> p.addString("outputName", "r.txt"))
+        .output("r.txt"))
+    .job(b -> b.name("sorter-2")
+        .flow(sortFileFlow)
+        .after("validator")
+        .input("splitter", "part2.txt")
+        .parameters(p -> p.addString("outputName", "r.txt"))
+        .output("r.txt"))
+    .job(b -> b.name("merger")
+        .flow(mergeFilesFlow)
+        .input("sorter-1", "r.txt")
+        .input("sorter-2", "r.txt")
+        .parameters(p -> p.addString("outputName", "r.txt"))
+        .output("r.txt"))
+    .output("merger", "r.txt")
+    .build();
+
+```
 
 ## Execute a workflow
 
-__Todo__
+A workflow is executed (started or restarted) by a workflow scheduler (interface `eu.slipo.workflows.service.WorkflowScheduler`). Currently, the only implementation is the
+`EventBasedWorkflowScheduler`.
 
