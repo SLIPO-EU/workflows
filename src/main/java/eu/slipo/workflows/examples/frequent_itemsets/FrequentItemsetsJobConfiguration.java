@@ -6,6 +6,7 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -13,18 +14,28 @@ import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
 
 import org.springframework.batch.core.Step;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.StepExecution;
 import org.springframework.batch.core.StepExecutionListener;
 import org.springframework.batch.core.configuration.annotation.JobScope;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.job.builder.FlowBuilder;
 import org.springframework.batch.core.job.flow.Flow;
+import org.springframework.batch.core.scope.context.ChunkContext;
 import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 
 import eu.slipo.workflows.ExecutionContextPromotionListeners;
 import eu.slipo.workflows.util.tasklet.ConcatenateFilesTasklet;
@@ -32,7 +43,7 @@ import eu.slipo.workflows.util.tasklet.SplitFileTasklet;
 
 @Configuration("frequent_itemsets.jobConfiguration")
 public class FrequentItemsetsJobConfiguration
-{
+{  
     @Autowired
     private StepBuilderFactory stepBuilderFactory;
    
@@ -62,6 +73,23 @@ public class FrequentItemsetsJobConfiguration
     public StepExecutionListener contextListener()
     {
         return ExecutionContextPromotionListeners.fromKeys("outputDir");
+    }
+    
+    private static final long RESULT_CACHE_MAX_SIZE = 1000L;
+    
+    @Bean("frequent_itemsets.resultCache")
+    public LoadingCache<Path, Result> resultCache()
+    {
+        return CacheBuilder.newBuilder()
+            .maximumSize(RESULT_CACHE_MAX_SIZE)
+            .build(new CacheLoader<Path, Result> () {
+
+                @Override
+                public Result load(Path path) throws Exception
+                {
+                    return Result.loadFromFile(path);
+                }
+            });
     }
     
     @Bean("frequent_itemsets.splitFile.tasklet")
@@ -135,18 +163,54 @@ public class FrequentItemsetsJobConfiguration
     @Bean("frequent_itemsets.mergeFiles.tasklet")
     @JobScope
     public Tasklet mergeFilesTasklet(
-        @Value("#{jobParameters['input']}") String input,
+        @Value("#{jobParameters['input']}") String resultFiles,
         @Value("#{jobParameters['outputName']}") String outputName,
         @Value("#{jobParameters['thresholdFrequency']}") double thresholdFrequency,
-        @Value("#{jobExecution.jobInstance.id}") Long jobId)
+        @Value("#{jobExecution.jobInstance.id}") Long jobId,
+        @Qualifier("frequent_itemsets.resultCache") LoadingCache<Path, Result> resultCache)
     {
-        Path[] inputPaths = Arrays.stream(input.split(File.pathSeparator))
+        Assert.isTrue(!StringUtils.isEmpty(outputName), "An output name is required");
+        Assert.isTrue(thresholdFrequency > 0 && thresholdFrequency < 1,
+            "A threshold frequency is expected as a relative frequency in (0,1)");
+        List<Path> resultPaths = Arrays.stream(resultFiles.split(File.pathSeparator))
             .filter(p -> !p.isEmpty())
-            .map(Paths::get)
-            .toArray(Path[]::new);
+            .collect(Collectors.mapping(Paths::get, Collectors.toList()));
+        Assert.isTrue(resultPaths.size() > 1, 
+            "Expected at least 2 partial results to merge");
+        
         Path outputDir = jobDataDirectory.resolve(
             Paths.get("frequent_itemsets.mergeFiles", String.valueOf(jobId)));
-        return new MergeFilesTasklet(outputDir, outputName, thresholdFrequency, inputPaths);
+        
+        return new Tasklet() 
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) 
+                throws Exception
+            {                
+                StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
+                ExecutionContext executionContext = stepExecution.getExecutionContext();
+                
+                // Create output directory
+                try {
+                    Files.createDirectory(outputDir);
+                } catch (FileAlreadyExistsException ex) {}
+                
+                // Load partial results and merge
+                List<Result> partialResults = new ArrayList<>();
+                for (Path path: resultPaths)
+                    partialResults.add(resultCache.get(path));
+                
+                final Result result = FrequencyCounter.mergeResults(partialResults, thresholdFrequency);
+                
+                final Path outputPath = outputDir.resolve(outputName);
+                result.writeToFile(outputPath);
+                
+                // Update execution context
+                executionContext.put("outputDir", outputDir.toString());
+                
+                return null;
+            }
+        };
     }
     
     @Bean("frequent_itemsets.mergeFiles.step")
@@ -174,9 +238,40 @@ public class FrequentItemsetsJobConfiguration
         @Value("#{jobExecution.jobInstance.id}") Long jobId)
     {
         Path inputPath = Paths.get(input);
+        Assert.isTrue(inputPath != null && inputPath.isAbsolute(), 
+            "Expected input file (transactions file) as an absolute file path");
+        Assert.isTrue(!StringUtils.isEmpty(outputName), "An output name is required");
+        
         Path outputDir = jobDataDirectory.resolve(
             Paths.get("frequent_itemsets.countSingletonFrequencies", String.valueOf(jobId)));
-        return new CountSingletonFrequenciesTasklet(outputDir, outputName, inputPath);
+        
+        return new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
+                ExecutionContext executionContext = stepExecution.getExecutionContext();
+                
+                // Create output directory
+                try {
+                    Files.createDirectory(outputDir);
+                } catch (FileAlreadyExistsException ex) {}
+                
+                // Count frequencies and write result to file
+                
+                final Result result = (new FrequencyCounter(inputPath)).countSingletonFrequencies();
+                
+                final Path outputPath = outputDir.resolve(outputName);
+                result.writeToFile(outputPath);
+                
+                // Update execution context
+                executionContext.put("outputDir", outputDir.toString());
+                
+                return null;
+            }
+        };
     }
     
     @Bean("frequent_itemsets.countSingletonFrequencies.step")
@@ -202,13 +297,48 @@ public class FrequentItemsetsJobConfiguration
         @Value("#{jobParameters['input']}") String input,
         @Value("#{jobParameters['input.result1']}") String result1File,
         @Value("#{jobParameters['outputName']}") String outputName,
-        @Value("#{jobExecution.jobInstance.id}") Long jobId)
+        @Value("#{jobExecution.jobInstance.id}") Long jobId,
+        @Qualifier("frequent_itemsets.resultCache") LoadingCache<Path, Result> resultCache)
     {
         Path inputPath = Paths.get(input);
+        Assert.isTrue(inputPath != null && inputPath.isAbsolute(), 
+            "Expected input file (transactions file) as an absolute file path");
         Path result1Path = Paths.get(result1File);
-        Path outputDir = jobDataDirectory.resolve(
+        Assert.isTrue(result1Path != null && result1Path.isAbsolute(), 
+            "Expected results file (of previous counting phase) as an absolute file path");
+        Assert.isTrue(!StringUtils.isEmpty(outputName), "An output name is required");
+        
+        Path outputDir = jobDataDirectory.resolve(        
             Paths.get("frequent_itemsets.countFrequencies", String.valueOf(jobId)));
-        return new CountFrequenciesTasklet(outputDir, outputName, inputPath, result1Path);
+        
+        return new Tasklet()
+        {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)
+                throws Exception
+            {
+                StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
+                ExecutionContext executionContext = stepExecution.getExecutionContext();
+                
+                // Create output directory
+                try {
+                    Files.createDirectory(outputDir);
+                } catch (FileAlreadyExistsException ex) {}
+                
+                // Count frequencies and write result to file
+                
+                final Result result1 = resultCache.get(result1Path);
+                final Result result = (new FrequencyCounter(inputPath)).countFrequencies(result1);
+                
+                final Path outputPath = outputDir.resolve(outputName);
+                result.writeToFile(outputPath);
+                
+                // Update execution context
+                executionContext.put("outputDir", outputDir.toString());
+                
+                return null;
+            }
+        };
     }
    
     @Bean("frequent_itemsets.countFrequencies.step")
