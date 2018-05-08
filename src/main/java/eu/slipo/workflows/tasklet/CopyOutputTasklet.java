@@ -144,7 +144,9 @@ public class CopyOutputTasklet implements Tasklet
     private void copyToTargetDirectory(Path outputDir, Path source) throws IOException
     {
         Path target = targetDir.resolve(source);
+        
         Path path = outputDir.resolve(source);
+        path = path.toRealPath(); // follow symbolic links (if any)
      
         // Create nested directory structure for target (if needed)
         
